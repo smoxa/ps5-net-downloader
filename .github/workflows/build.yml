@@ -46,7 +46,15 @@ jobs:
 
       - name: Build Net Downloader ELF
         run: |
-          make PS5_PAYLOAD_SDK=$HOME/ps5-payload-sdk
+          make PS5_PAYLOAD_SDK=$HOME/ps5-payload-sdk 2>&1 | tee /tmp/build.log
+
+      - name: Report Build Log
+        if: always()
+        run: |
+          echo "### Build Log" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          cat /tmp/build.log >> $GITHUB_STEP_SUMMARY 2>/dev/null || true
+          echo '```' >> $GITHUB_STEP_SUMMARY
 
       - name: Upload ELF Artifact
         uses: actions/upload-artifact@v4

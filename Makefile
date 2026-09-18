@@ -6,15 +6,16 @@ else
     $(error PS5_PAYLOAD_SDK is undefined)
 endif
 
-ELF  := ps5-net-downloader.elf
-SRCS := src/main.c src/server.c src/downloader.c
+ELF     := ps5-net-downloader.elf
+SRCS    := src/main.c src/server.c src/downloader.c
 
-CFLAGS += -Wall -Wextra -O2 -Isrc -lpthread
+CFLAGS  += -Wall -Wextra -O2 -Isrc
+LDFLAGS += -lpthread
 
 all: $(ELF)
 
 $(ELF): $(SRCS)
-	$(CC) $(CFLAGS) -o $@ $^
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 clean:
 	rm -f $(ELF)
