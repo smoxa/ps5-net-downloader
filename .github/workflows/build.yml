@@ -1,0 +1,45 @@
+name: Build PS5 ELF Payload
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install Toolchain Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            clang \
+            lld \
+            llvm \
+            git \
+            python3 \
+            ca-certificates
+
+      - name: Setup ps5-payload-sdk
+        run: |
+          git clone --recurse-submodules https://github.com/ps5-payload-dev/ps5-payload-sdk.git $HOME/ps5-payload-sdk
+          make -C $HOME/ps5-payload-sdk
+          echo "PS5_PAYLOAD_SDK=$HOME/ps5-payload-sdk" >> $GITHUB_ENV
+
+      - name: Build Net Downloader ELF
+        run: |
+          make PS5_PAYLOAD_SDK=$HOME/ps5-payload-sdk
+
+      - name: Upload ELF Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ps5-net-downloader-elf
+          path: ps5-net-downloader.elf
+          if-no-files-found: error

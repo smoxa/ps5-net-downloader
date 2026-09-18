@@ -1,0 +1,463 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PS5 Net Downloader</title>
+    <style>
+        :root {
+            --bg-base: #0a0e17;
+            --bg-card: #131b2e;
+            --bg-input: #1b2640;
+            --accent: #0070d1;
+            --accent-hover: #0084f7;
+            --accent-glow: rgba(0, 112, 209, 0.4);
+            --text-main: #f0f4fc;
+            --text-muted: #8c9bb5;
+            --border: #233354;
+            --success: #00d26a;
+            --error: #f8312f;
+            --warning: #ffaa00;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+        }
+
+        body {
+            background: var(--bg-base);
+            color: var(--text-main);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 24px 16px;
+        }
+
+        .container {
+            width: 100%;
+            max-width: 680px;
+            margin-top: 20px;
+        }
+
+        header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 24px;
+            padding-bottom: 16px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .brand {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .ps-logo {
+            width: 36px;
+            height: 36px;
+            background: var(--accent);
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 900;
+            font-size: 18px;
+            box-shadow: 0 0 15px var(--accent-glow);
+        }
+
+        h1 {
+            font-size: 22px;
+            font-weight: 700;
+            letter-spacing: 0.5px;
+        }
+
+        .status-badge {
+            font-size: 12px;
+            padding: 4px 12px;
+            border-radius: 12px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.8px;
+            background: var(--border);
+            color: var(--text-muted);
+        }
+
+        .status-badge.idle { background: rgba(140, 155, 181, 0.15); color: var(--text-muted); }
+        .status-badge.downloading { background: rgba(0, 112, 209, 0.2); color: #4da3ff; border: 1px solid var(--accent); }
+        .status-badge.completed { background: rgba(0, 210, 106, 0.15); color: var(--success); }
+        .status-badge.error { background: rgba(248, 49, 47, 0.15); color: var(--error); }
+
+        .card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 14px;
+            padding: 24px;
+            margin-bottom: 20px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
+        }
+
+        .card-title {
+            font-size: 16px;
+            font-weight: 600;
+            margin-bottom: 18px;
+            color: var(--text-main);
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .form-group {
+            margin-bottom: 16px;
+        }
+
+        label {
+            display: block;
+            font-size: 13px;
+            font-weight: 500;
+            color: var(--text-muted);
+            margin-bottom: 6px;
+        }
+
+        input[type="text"], input[type="url"] {
+            width: 100%;
+            background: var(--bg-input);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 12px 14px;
+            color: var(--text-main);
+            font-size: 14px;
+            outline: none;
+            transition: border-color 0.2s, box-shadow 0.2s;
+        }
+
+        input[type="text"]:focus, input[type="url"]:focus {
+            border-color: var(--accent);
+            box-shadow: 0 0 0 3px var(--accent-glow);
+        }
+
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            padding: 12px 20px;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            border: none;
+            transition: all 0.2s;
+            gap: 8px;
+        }
+
+        .btn-primary {
+            background: var(--accent);
+            color: #fff;
+            width: 100%;
+            margin-top: 8px;
+            box-shadow: 0 4px 15px var(--accent-glow);
+        }
+
+        .btn-primary:hover:not(:disabled) {
+            background: var(--accent-hover);
+            transform: translateY(-1px);
+        }
+
+        .btn-primary:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .btn-danger {
+            background: rgba(248, 49, 47, 0.15);
+            color: var(--error);
+            border: 1px solid rgba(248, 49, 47, 0.4);
+            margin-top: 14px;
+        }
+
+        .btn-danger:hover {
+            background: var(--error);
+            color: #fff;
+        }
+
+        /* Progress section */
+        .progress-box {
+            display: none;
+            margin-top: 10px;
+        }
+
+        .progress-box.active {
+            display: block;
+        }
+
+        .file-info {
+            display: flex;
+            justify-content: space-between;
+            font-size: 13px;
+            margin-bottom: 8px;
+            word-break: break-all;
+        }
+
+        .progress-bar-container {
+            width: 100%;
+            height: 12px;
+            background: var(--bg-input);
+            border-radius: 6px;
+            overflow: hidden;
+            position: relative;
+        }
+
+        .progress-bar {
+            height: 100%;
+            width: 0%;
+            background: linear-gradient(90deg, var(--accent), #00b4d8);
+            border-radius: 6px;
+            transition: width 0.3s ease;
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 12px;
+            margin-top: 16px;
+            text-align: center;
+        }
+
+        .stat-item {
+            background: var(--bg-input);
+            padding: 10px;
+            border-radius: 8px;
+            border: 1px solid var(--border);
+        }
+
+        .stat-label {
+            font-size: 11px;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            margin-bottom: 4px;
+        }
+
+        .stat-value {
+            font-size: 14px;
+            font-weight: 700;
+            color: var(--text-main);
+        }
+
+        .help-box {
+            font-size: 12px;
+            color: var(--text-muted);
+            line-height: 1.6;
+        }
+
+        .help-box code {
+            background: var(--bg-input);
+            padding: 2px 6px;
+            border-radius: 4px;
+            color: #4da3ff;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <div class="brand">
+                <div class="ps-logo">PS</div>
+                <div>
+                    <h1>Net Downloader</h1>
+                </div>
+            </div>
+            <div id="statusBadge" class="status-badge idle">Ожидание</div>
+        </header>
+
+        <!-- Форма добавления задачи -->
+        <div class="card">
+            <div class="card-title">
+                <span>Новая загрузка</span>
+            </div>
+            <div class="form-group">
+                <label for="fileUrl">Прямая ссылка на файл (HTTP / HTTPS):</label>
+                <input type="url" id="fileUrl" placeholder="http://192.168.1.100:8000/game.pkg" required>
+            </div>
+            <div class="form-group">
+                <label for="savePath">Директория сохранения на PS5:</label>
+                <input type="text" id="savePath" value="/data/pkg/" placeholder="/data/pkg/">
+            </div>
+            <div class="form-group">
+                <label for="customFilename">Пользовательское имя файла (опционально):</label>
+                <input type="text" id="customFilename" placeholder="Оставьте пустым для автоопределения из ссылки">
+            </div>
+            <button id="startBtn" class="btn btn-primary" onclick="startDownload()">
+                Начать загрузку на PS5
+            </button>
+        </div>
+
+        <!-- Прогресс текущей загрузки -->
+        <div id="progressCard" class="card progress-box">
+            <div class="card-title">Текущая загрузка</div>
+            <div class="file-info">
+                <span id="currentFileName" style="font-weight: 600;">game.pkg</span>
+                <span id="percentText">0%</span>
+            </div>
+            <div class="progress-bar-container">
+                <div id="progressBar" class="progress-bar"></div>
+            </div>
+
+            <div class="stats-grid">
+                <div class="stat-item">
+                    <div class="stat-label">Размер</div>
+                    <div id="sizeStat" class="stat-value">0 / 0 MB</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-label">Скорость</div>
+                    <div id="speedStat" class="stat-value">0 MB/s</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-label">Статус</div>
+                    <div id="stateStat" class="stat-value">Подключение...</div>
+                </div>
+            </div>
+
+            <button id="abortBtn" class="btn btn-danger" onclick="abortDownload()">
+                Прервать загрузку
+            </button>
+        </div>
+
+        <!-- Справка -->
+        <div class="card help-box">
+            <div class="card-title" style="font-size: 14px; margin-bottom: 8px;">Информация и подсказки</div>
+            <p>• Файлы сохраняются во внутренний накопитель PS5 (по умолчанию <code>/data/pkg/</code>).</p>
+            <p>• Для максимальной скорости рекомендуется раздавать файлы с ПК по локальной сети через HTTP (например, <code>python -m http.server 8000</code> или HFS).</p>
+            <p>• Сервер слушает порт <code>8080</code> в фоновом потоке консоли.</p>
+        </div>
+    </div>
+
+    <script>
+        let pollTimer = null;
+
+        function formatBytes(bytes) {
+            if (!bytes || bytes <= 0) return '0 B';
+            const k = 1024;
+            const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+        }
+
+        async function fetchStatus() {
+            try {
+                const res = await fetch('/api/status');
+                if (!res.ok) return;
+                const data = await res.json();
+                updateUI(data);
+            } catch (err) {
+                console.error("Ошибка опроса статуса:", err);
+            }
+        }
+
+        function updateUI(data) {
+            const badge = document.getElementById('statusBadge');
+            const progressCard = document.getElementById('progressCard');
+            const startBtn = document.getElementById('startBtn');
+            const progressBar = document.getElementById('progressBar');
+            const percentText = document.getElementById('percentText');
+            const currentFileName = document.getElementById('currentFileName');
+            const sizeStat = document.getElementById('sizeStat');
+            const speedStat = document.getElementById('speedStat');
+            const stateStat = document.getElementById('stateStat');
+
+            if (data.status === 'downloading') {
+                badge.className = 'status-badge downloading';
+                badge.textContent = 'Скачивание';
+                progressCard.classList.add('active');
+                startBtn.disabled = true;
+
+                const percent = data.total_bytes > 0 
+                    ? Math.min(100, (data.downloaded_bytes / data.total_bytes * 100)).toFixed(1) 
+                    : 0;
+
+                progressBar.style.width = percent + '%';
+                percentText.textContent = percent + '%';
+                currentFileName.textContent = data.filename || 'Загрузка...';
+
+                sizeStat.textContent = `${formatBytes(data.downloaded_bytes)} / ${formatBytes(data.total_bytes)}`;
+                speedStat.textContent = `${(data.speed_bytes_sec / (1024 * 1024)).toFixed(2)} MB/s`;
+                stateStat.textContent = 'В процессе';
+            } else if (data.status === 'completed') {
+                badge.className = 'status-badge completed';
+                badge.textContent = 'Завершено';
+                progressBar.style.width = '100%';
+                percentText.textContent = '100%';
+                stateStat.textContent = 'Готово!';
+                startBtn.disabled = false;
+            } else if (data.status === 'error') {
+                badge.className = 'status-badge error';
+                badge.textContent = 'Ошибка';
+                stateStat.textContent = data.error_message || 'Сбой';
+                startBtn.disabled = false;
+            } else {
+                badge.className = 'status-badge idle';
+                badge.textContent = 'Ожидание';
+                progressCard.classList.remove('active');
+                startBtn.disabled = false;
+            }
+        }
+
+        async function startDownload() {
+            const urlInput = document.getElementById('fileUrl');
+            const savePathInput = document.getElementById('savePath');
+            const filenameInput = document.getElementById('customFilename');
+
+            const url = urlInput.value.trim();
+            if (!url) {
+                alert('Пожалуйста, введите прямую ссылку на файл.');
+                return;
+            }
+
+            const payload = {
+                url: url,
+                save_dir: savePathInput.value.trim() || '/data/pkg/',
+                filename: filenameInput.value.trim()
+            };
+
+            try {
+                const res = await fetch('/api/download', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+
+                if (!res.ok) {
+                    const errData = await res.json();
+                    alert('Ошибка запуска загрузки: ' + (errData.error || res.statusText));
+                    return;
+                }
+
+                document.getElementById('progressCard').classList.add('active');
+                document.getElementById('startBtn').disabled = true;
+                fetchStatus();
+            } catch (err) {
+                alert('Сетевая ошибка при отправке задачи: ' + err.message);
+            }
+        }
+
+        async function abortDownload() {
+            if (!confirm('Прервать текущую загрузку?')) return;
+            try {
+                await fetch('/api/abort', { method: 'POST' });
+                fetchStatus();
+            } catch (err) {
+                alert('Ошибка при попытке отмены: ' + err.message);
+            }
+        }
+
+        // Запуск регулярного опроса раз в секунду
+        pollTimer = setInterval(fetchStatus, 1000);
+        fetchStatus();
+    </script>
+</body>
+</html>

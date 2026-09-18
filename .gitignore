@@ -1,0 +1,20 @@
+# Binaries and build artifacts
+*.elf
+*.bin
+*.o
+*.obj
+*.a
+*.so
+*.dylib
+build/
+dist/
+bin/
+
+# Temporary and editor files
+.vscode/
+.idea/
+*.swp
+*~
+Thumbs.db
+[Dd]esktop.ini
+.DS_Store
