@@ -11,6 +11,7 @@
 #include <netdb.h>
 #include <sys/stat.h>
 #include <sys/time.h>
+#include <time.h>
 #include <errno.h>
 
 #define CHUNK_BUFFER_SIZE (128 * 1024) // 128 KB buffer

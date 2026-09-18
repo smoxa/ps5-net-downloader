@@ -23,6 +23,7 @@ jobs:
             clang \
             lld \
             llvm \
+            llvm-dev \
             unzip \
             curl \
             python3 \
@@ -32,7 +33,16 @@ jobs:
         run: |
           curl -sL -o /tmp/ps5-payload-sdk.zip https://github.com/ps5-payload-dev/sdk/releases/latest/download/ps5-payload-sdk.zip
           unzip -q /tmp/ps5-payload-sdk.zip -d $HOME
+          chmod +x $HOME/ps5-payload-sdk/bin/*
           echo "PS5_PAYLOAD_SDK=$HOME/ps5-payload-sdk" >> $GITHUB_ENV
+          echo "$HOME/ps5-payload-sdk/bin" >> $GITHUB_PATH
+
+          # Detect llvm-config
+          if command -v llvm-config-18 >/dev/null 2>&1; then
+            echo "LLVM_CONFIG=llvm-config-18" >> $GITHUB_ENV
+          elif command -v llvm-config >/dev/null 2>&1; then
+            echo "LLVM_CONFIG=llvm-config" >> $GITHUB_ENV
+          fi
 
       - name: Build Net Downloader ELF
         run: |

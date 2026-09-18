@@ -1,28 +1,22 @@
 PS5_PAYLOAD_SDK ?= $(HOME)/ps5-payload-sdk
 
-TARGET = ps5-net-downloader.elf
-CFILES = $(wildcard src/*.c)
-OBJS   = $(CFILES:.c=.o)
-CFLAGS += -Isrc -Wall -Wextra -O2
-
-ifneq ($(wildcard $(PS5_PAYLOAD_SDK)/toolchain/prospero.mk),)
-include $(PS5_PAYLOAD_SDK)/toolchain/prospero.mk
-all: $(TARGET)
+ifdef PS5_PAYLOAD_SDK
+    include $(PS5_PAYLOAD_SDK)/toolchain/prospero.mk
 else
-CC     ?= clang
-CFLAGS += -target x86_64-unknown-freebsd12.0 -fPIC -pthread
-LDFLAGS ?= -target x86_64-unknown-freebsd12.0 -fuse-ld=lld -pthread
+    $(error PS5_PAYLOAD_SDK is undefined)
+endif
 
-all: $(TARGET)
+ELF  := ps5-net-downloader.elf
+SRCS := src/main.c src/server.c src/downloader.c
 
-$(TARGET): $(OBJS)
-	$(CC) $(OBJS) $(LDFLAGS) -o $@
+CFLAGS += -Wall -Wextra -O2 -Isrc -lpthread
 
-%.o: %.c
-	$(CC) $(CFLAGS) -c $< -o $@
+all: $(ELF)
+
+$(ELF): $(SRCS)
+	$(CC) $(CFLAGS) -o $@ $^
 
 clean:
-	rm -f $(OBJS) $(TARGET)
+	rm -f $(ELF)
 
 .PHONY: all clean
-endif
