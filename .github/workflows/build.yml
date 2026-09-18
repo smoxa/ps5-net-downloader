@@ -34,27 +34,45 @@ jobs:
           curl -sL -o /tmp/ps5-payload-sdk.zip https://github.com/ps5-payload-dev/sdk/releases/latest/download/ps5-payload-sdk.zip
           unzip -q /tmp/ps5-payload-sdk.zip -d $HOME
           chmod +x $HOME/ps5-payload-sdk/bin/*
+
+          # Setup LLVM_CONFIG
+          if command -v llvm-config-18 >/dev/null 2>&1; then
+            echo "LLVM_CONFIG=llvm-config-18" >> $GITHUB_ENV
+            export LLVM_CONFIG=llvm-config-18
+          elif command -v llvm-config >/dev/null 2>&1; then
+            echo "LLVM_CONFIG=llvm-config" >> $GITHUB_ENV
+            export LLVM_CONFIG=llvm-config
+          fi
+
+          # Ensure clang and clang++ shims route cleanly to host llvm binaries
+          cat << 'EOF' > $HOME/ps5-payload-sdk/bin/clang
+          #!/usr/bin/env bash
+          LLVM_BINDIR=$($(dirname "$0")/prospero-llvm-config --bindir 2>/dev/null)
+          if [ -n "$LLVM_BINDIR" ] && [ -f "$LLVM_BINDIR/clang" ]; then
+              exec "$LLVM_BINDIR/clang" "$@"
+          fi
+          exec clang "$@"
+          EOF
+          chmod +x $HOME/ps5-payload-sdk/bin/clang
+
+          cat << 'EOF' > $HOME/ps5-payload-sdk/bin/clang++
+          #!/usr/bin/env bash
+          LLVM_BINDIR=$($(dirname "$0")/prospero-llvm-config --bindir 2>/dev/null)
+          if [ -n "$LLVM_BINDIR" ] && [ -f "$LLVM_BINDIR/clang++" ]; then
+              exec "$LLVM_BINDIR/clang++" "$@"
+          fi
+          exec clang++ "$@"
+          EOF
+          chmod +x $HOME/ps5-payload-sdk/bin/clang++
+
           echo "PS5_PAYLOAD_SDK=$HOME/ps5-payload-sdk" >> $GITHUB_ENV
           echo "$HOME/ps5-payload-sdk/bin" >> $GITHUB_PATH
 
-          # Detect llvm-config
-          if command -v llvm-config-18 >/dev/null 2>&1; then
-            echo "LLVM_CONFIG=llvm-config-18" >> $GITHUB_ENV
-          elif command -v llvm-config >/dev/null 2>&1; then
-            echo "LLVM_CONFIG=llvm-config" >> $GITHUB_ENV
-          fi
-
       - name: Build Net Downloader ELF
         run: |
-          make PS5_PAYLOAD_SDK=$HOME/ps5-payload-sdk 2>&1 | tee /tmp/build.log
-
-      - name: Report Build Log
-        if: always()
-        run: |
-          echo "### Build Log" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          cat /tmp/build.log >> $GITHUB_STEP_SUMMARY 2>/dev/null || true
-          echo '```' >> $GITHUB_STEP_SUMMARY
+          set -e
+          make PS5_PAYLOAD_SDK=$HOME/ps5-payload-sdk
+          ls -la ps5-net-downloader.elf
 
       - name: Upload ELF Artifact
         uses: actions/upload-artifact@v4
