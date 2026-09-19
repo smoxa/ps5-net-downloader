@@ -2,6 +2,8 @@
 #include <stdlib.h>
 #include <signal.h>
 #include <unistd.h>
+#include <sys/time.h>
+#include <sys/resource.h>
 
 #include "downloader.h"
 #include "server.h"
@@ -30,6 +32,9 @@ int main(int argc, char *argv[]) {
 #ifdef SIGPIPE
     signal(SIGPIPE, SIG_IGN);
 #endif
+
+    // Boost process priority to maximum (-20) so FreeBSD kernel prioritizes network and disk I/O
+    setpriority(PRIO_PROCESS, 0, -20);
 
     printf("========================================\n");
     printf("  PS5 Net Downloader Turbo Edition v1.5 \n");

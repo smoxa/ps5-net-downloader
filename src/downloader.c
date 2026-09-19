@@ -19,17 +19,15 @@
 #include <netinet/tcp.h>
 
 #define MAX_THREADS 32
-#define CHUNK_BUFFER_SIZE (1024 * 1024L) // 1 MB buffer for max throughput
+#define CHUNK_BUFFER_SIZE (512 * 1024L) // 512 KB curl socket buffer
+#define WORKER_WRITE_BUF_SIZE (2 * 1024 * 1024) // 2 MB RAM buffer for write coalescing
+#define SINGLE_WRITE_BUF_SIZE (2 * 1024 * 1024) // 2 MB RAM buffer for single-stream
 
 static int curl_sockopt_cb(void *clientp, curl_socket_t curlfd, curlsocktype purpose) {
     (void)clientp;
     (void)purpose;
-    int rcvbufs[] = { 2097152, 1048576, 524288, 262144, 131072 };
-    for (size_t i = 0; i < sizeof(rcvbufs)/sizeof(rcvbufs[0]); i++) {
-        if (setsockopt(curlfd, SOL_SOCKET, SO_RCVBUF, (const char *)&rcvbufs[i], sizeof(rcvbufs[i])) == 0) {
-            break;
-        }
-    }
+    // Enable TCP_NODELAY and preserve OS TCP window autotuning
+    // (Manual SO_RCVBUF is omitted to allow dynamic TCP window scaling)
     int nodelay = 1;
     setsockopt(curlfd, IPPROTO_TCP, TCP_NODELAY, (const char *)&nodelay, sizeof(nodelay));
     return CURL_SOCKOPT_OK;
@@ -37,6 +35,7 @@ static int curl_sockopt_cb(void *clientp, curl_socket_t curlfd, curlsocktype pur
 
 typedef struct {
     int thread_id;
+    char save_path[512];
     int file_fd;
     char url[2048];
     uint64_t start_byte;
@@ -45,7 +44,18 @@ typedef struct {
     uint64_t bytes_downloaded;
     volatile int finished;
     volatile int error;
+    char *write_buf;
+    size_t write_buf_len;
 } worker_args_t;
+
+typedef struct {
+    int file_fd;
+    char *write_buf;
+    size_t write_buf_len;
+    uint64_t bytes_downloaded;
+    double last_speed_time;
+    uint64_t last_bytes;
+} single_ctx_t;
 
 typedef struct {
     uint64_t total_size;
@@ -243,36 +253,117 @@ static size_t worker_write_callback(char *ptr, size_t size, size_t nmemb, void *
         return 0; // Abort curl immediately
     }
 
-    ssize_t written = pwrite(args->file_fd, ptr, total_bytes, args->current_offset);
-    if (written != (ssize_t)total_bytes) {
-        args->error = 1;
-        return 0; // Signal write failure to curl
+    if (!args->write_buf) {
+        ssize_t written = pwrite(args->file_fd, ptr, total_bytes, args->current_offset);
+        if (written != (ssize_t)total_bytes) {
+            args->error = 1;
+            return 0;
+        }
+        args->current_offset += total_bytes;
+        args->bytes_downloaded += total_bytes;
+        return total_bytes;
     }
 
-    args->current_offset += total_bytes;
-    args->bytes_downloaded += total_bytes;
+    size_t remaining = total_bytes;
+    const char *src = ptr;
 
+    while (remaining > 0) {
+        size_t space = WORKER_WRITE_BUF_SIZE - args->write_buf_len;
+        size_t to_copy = (remaining < space) ? remaining : space;
+
+        memcpy(args->write_buf + args->write_buf_len, src, to_copy);
+        args->write_buf_len += to_copy;
+        src += to_copy;
+        remaining -= to_copy;
+
+        if (args->write_buf_len >= WORKER_WRITE_BUF_SIZE) {
+            ssize_t written = pwrite(args->file_fd, args->write_buf, args->write_buf_len, args->current_offset);
+            if (written != (ssize_t)args->write_buf_len) {
+                args->error = 1;
+                return 0;
+            }
+            args->current_offset += written;
+            args->write_buf_len = 0;
+        }
+    }
+
+    args->bytes_downloaded += total_bytes;
     return total_bytes;
 }
 
 static size_t single_stream_write_callback(char *ptr, size_t size, size_t nmemb, void *userdata) {
-    int file_fd = *(int *)userdata;
+    single_ctx_t *ctx = (single_ctx_t *)userdata;
     size_t total_bytes = size * nmemb;
 
     if (g_abort_flag) {
         return 0;
     }
 
-    ssize_t written = write(file_fd, ptr, total_bytes);
-    if (written != (ssize_t)total_bytes) {
-        return 0;
+    if (!ctx->write_buf) {
+        ssize_t written = write(ctx->file_fd, ptr, total_bytes);
+        if (written != (ssize_t)total_bytes) {
+            return 0;
+        }
+        ctx->bytes_downloaded += total_bytes;
+        return total_bytes;
     }
 
+    size_t remaining = total_bytes;
+    const char *src = ptr;
+
+    while (remaining > 0) {
+        size_t space = SINGLE_WRITE_BUF_SIZE - ctx->write_buf_len;
+        size_t to_copy = (remaining < space) ? remaining : space;
+
+        memcpy(ctx->write_buf + ctx->write_buf_len, src, to_copy);
+        ctx->write_buf_len += to_copy;
+        src += to_copy;
+        remaining -= to_copy;
+
+        if (ctx->write_buf_len >= SINGLE_WRITE_BUF_SIZE) {
+            ssize_t written = write(ctx->file_fd, ctx->write_buf, ctx->write_buf_len);
+            if (written != (ssize_t)ctx->write_buf_len) {
+                return 0;
+            }
+            ctx->write_buf_len = 0;
+        }
+    }
+
+    ctx->bytes_downloaded += total_bytes;
+    return total_bytes;
+}
+
+static int single_stream_xferinfo_callback(void *clientp, curl_off_t dltotal, curl_off_t dlnow, curl_off_t ultotal, curl_off_t ulnow) {
+    (void)ultotal;
+    (void)ulnow;
+    if (g_abort_flag) return 1;
+
+    single_ctx_t *ctx = (single_ctx_t *)clientp;
+    double now = get_time_seconds();
+
     pthread_mutex_lock(&g_mutex);
-    g_status.downloaded_bytes += total_bytes;
+    g_status.downloaded_bytes = (uint64_t)dlnow;
+    if (dltotal > 0) {
+        g_status.total_bytes = (uint64_t)dltotal;
+    }
+
+    double elapsed = now - ctx->last_speed_time;
+    if (elapsed >= 0.5) {
+        uint64_t diff = (dlnow >= (curl_off_t)ctx->last_bytes) ? (uint64_t)(dlnow - ctx->last_bytes) : 0;
+        double speed = (double)diff / elapsed;
+        g_status.speed_bytes_sec = speed;
+        ctx->last_speed_time = now;
+        ctx->last_bytes = (uint64_t)dlnow;
+
+        if (speed > 1024.0 && dltotal > dlnow) {
+            g_status.eta_seconds = (uint64_t)((dltotal - dlnow) / speed);
+        } else {
+            g_status.eta_seconds = 0;
+        }
+    }
     pthread_mutex_unlock(&g_mutex);
 
-    return total_bytes;
+    return 0;
 }
 
 static void *parallel_chunk_worker(void *arg) {
@@ -281,9 +372,31 @@ static void *parallel_chunk_worker(void *arg) {
     args->error = 0;
     args->bytes_downloaded = 0;
     args->current_offset = args->start_byte;
+    args->write_buf_len = 0;
+
+    args->write_buf = malloc(WORKER_WRITE_BUF_SIZE);
+    if (!args->write_buf) {
+        args->error = 1;
+        args->finished = 1;
+        return NULL;
+    }
+
+    // Open independent file descriptor for this worker thread to eliminate
+    // kernel file-table descriptor lock contention among concurrent threads
+    int thread_fd = open(args->save_path, O_WRONLY);
+    int orig_fd = args->file_fd;
+    if (thread_fd >= 0) {
+        args->file_fd = thread_fd;
+    }
 
     CURL *curl = curl_easy_init();
     if (!curl) {
+        if (thread_fd >= 0) {
+            close(thread_fd);
+        }
+        args->file_fd = orig_fd;
+        free(args->write_buf);
+        args->write_buf = NULL;
         args->error = 1;
         args->finished = 1;
         return NULL;
@@ -313,12 +426,40 @@ static void *parallel_chunk_worker(void *arg) {
     curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
     curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, download_xferinfo_callback);
 
+    // TLS Ciphers optimization: Prefer ChaCha20-Poly1305 and AES-128 for lowest CPU overhead
+    curl_easy_setopt(curl, CURLOPT_SSL_CIPHER_LIST, "ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:HIGH:!aNULL:!MD5:!RC4");
+#ifdef CURLOPT_TLS13_CIPHERS
+    curl_easy_setopt(curl, CURLOPT_TLS13_CIPHERS, "TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384");
+#endif
+
     CURLcode res = curl_easy_perform(curl);
     if (res != CURLE_OK && res != CURLE_ABORTED_BY_CALLBACK && res != CURLE_WRITE_ERROR) {
         args->error = 1;
     }
 
+    // Flush any remaining buffered data in RAM
+    if (!args->error && !g_abort_flag && args->write_buf && args->write_buf_len > 0) {
+        ssize_t written = pwrite(args->file_fd, args->write_buf, args->write_buf_len, args->current_offset);
+        if (written != (ssize_t)args->write_buf_len) {
+            args->error = 1;
+        } else {
+            args->current_offset += written;
+            args->write_buf_len = 0;
+        }
+    }
+
     curl_easy_cleanup(curl);
+
+    if (thread_fd >= 0) {
+        close(thread_fd);
+    }
+    args->file_fd = orig_fd;
+
+    if (args->write_buf) {
+        free(args->write_buf);
+        args->write_buf = NULL;
+    }
+
     args->finished = 1;
     return NULL;
 }
@@ -492,6 +633,8 @@ static void *master_download_thread(void *arg) {
         for (int i = 0; i < thread_count; i++) {
             args[i].thread_id = i;
             args[i].file_fd = file_fd;
+            strncpy(args[i].save_path, g_status.save_path, sizeof(args[i].save_path) - 1);
+            args[i].save_path[sizeof(args[i].save_path) - 1] = '\0';
             strncpy(args[i].url, target_url, sizeof(args[i].url) - 1);
             args[i].url[sizeof(args[i].url) - 1] = '\0';
             args[i].start_byte = i * segment_size;
@@ -567,12 +710,21 @@ static void *master_download_thread(void *arg) {
         free(threads);
         free(args);
     } else {
-        // Single-stream download via libcurl (handles servers without Range support like VikingFile)
+        // Single-stream download via libcurl with 2 MB write buffer (handles non-Range servers like VikingFile)
+        single_ctx_t ctx;
+        memset(&ctx, 0, sizeof(ctx));
+        ctx.file_fd = file_fd;
+        ctx.write_buf = malloc(SINGLE_WRITE_BUF_SIZE);
+        ctx.write_buf_len = 0;
+        ctx.bytes_downloaded = 0;
+        ctx.last_speed_time = get_time_seconds();
+        ctx.last_bytes = 0;
+
         CURL *single_curl = curl_easy_init();
         if (single_curl) {
             curl_easy_setopt(single_curl, CURLOPT_URL, target_url);
             curl_easy_setopt(single_curl, CURLOPT_WRITEFUNCTION, single_stream_write_callback);
-            curl_easy_setopt(single_curl, CURLOPT_WRITEDATA, &file_fd);
+            curl_easy_setopt(single_curl, CURLOPT_WRITEDATA, &ctx);
             curl_easy_setopt(single_curl, CURLOPT_FOLLOWLOCATION, 1L);
             curl_easy_setopt(single_curl, CURLOPT_MAXREDIRS, 10L);
             curl_easy_setopt(single_curl, CURLOPT_SSL_VERIFYPEER, 0L);
@@ -586,7 +738,13 @@ static void *master_download_thread(void *arg) {
             curl_easy_setopt(single_curl, CURLOPT_LOW_SPEED_LIMIT, 1024L);
             curl_easy_setopt(single_curl, CURLOPT_LOW_SPEED_TIME, 30L);
             curl_easy_setopt(single_curl, CURLOPT_NOPROGRESS, 0L);
-            curl_easy_setopt(single_curl, CURLOPT_XFERINFOFUNCTION, download_xferinfo_callback);
+            curl_easy_setopt(single_curl, CURLOPT_XFERINFOFUNCTION, single_stream_xferinfo_callback);
+            curl_easy_setopt(single_curl, CURLOPT_XFERINFODATA, &ctx);
+
+            curl_easy_setopt(single_curl, CURLOPT_SSL_CIPHER_LIST, "ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:HIGH:!aNULL:!MD5:!RC4");
+#ifdef CURLOPT_TLS13_CIPHERS
+            curl_easy_setopt(single_curl, CURLOPT_TLS13_CIPHERS, "TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384");
+#endif
 
             CURLcode res = curl_easy_perform(single_curl);
             if (res != CURLE_OK && res != CURLE_ABORTED_BY_CALLBACK && res != CURLE_WRITE_ERROR) {
@@ -596,7 +754,21 @@ static void *master_download_thread(void *arg) {
                 pthread_mutex_unlock(&g_mutex);
             }
 
+            // Flush remaining single stream buffer
+            if (ctx.write_buf && ctx.write_buf_len > 0 && !g_abort_flag) {
+                write(file_fd, ctx.write_buf, ctx.write_buf_len);
+                ctx.write_buf_len = 0;
+            }
+
+            pthread_mutex_lock(&g_mutex);
+            g_status.downloaded_bytes = ctx.bytes_downloaded;
+            pthread_mutex_unlock(&g_mutex);
+
             curl_easy_cleanup(single_curl);
+        }
+
+        if (ctx.write_buf) {
+            free(ctx.write_buf);
         }
     }
 
@@ -632,7 +804,7 @@ void downloader_init(void) {
     g_status.state = STATUS_IDLE;
     g_abort_flag = 0;
     g_is_running = 0;
-    g_requested_threads = 16;
+    g_requested_threads = 8;
     pthread_mutex_unlock(&g_mutex);
 
     curl_global_init(CURL_GLOBAL_ALL);
@@ -656,7 +828,7 @@ int downloader_start(const char *url, const char *save_dir, const char *filename
 
     g_abort_flag = 0;
     g_is_running = 1;
-    g_requested_threads = (threads >= 1 && threads <= MAX_THREADS) ? threads : 16;
+    g_requested_threads = (threads >= 1 && threads <= MAX_THREADS) ? threads : 8;
 
     strncpy(g_status.url, url, sizeof(g_status.url) - 1);
     g_status.url[sizeof(g_status.url) - 1] = '\0';
