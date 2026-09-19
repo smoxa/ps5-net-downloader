@@ -206,7 +206,7 @@ static size_t probe_write_dummy_callback(char *ptr, size_t size, size_t nmemb, v
     return size * nmemb;
 }
 
-static int curl_xferinfo_callback(void *clientp, curl_off_t dltotal, curl_off_t dlnow, curl_off_t ultotal, curl_off_t ulnow) {
+static int download_xferinfo_callback(void *clientp, curl_off_t dltotal, curl_off_t dlnow, curl_off_t ultotal, curl_off_t ulnow) {
     (void)clientp;
     (void)dltotal;
     (void)dlnow;
@@ -296,7 +296,7 @@ static void *parallel_chunk_worker(void *arg) {
     curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1024L);
     curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 30L);
     curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
-    curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, curl_xferinfo_callback);
+    curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, download_xferinfo_callback);
 
     CURLcode res = curl_easy_perform(curl);
     if (res != CURLE_OK && res != CURLE_ABORTED_BY_CALLBACK) {
@@ -538,7 +538,7 @@ static void *master_download_thread(void *arg) {
             curl_easy_setopt(single_curl, CURLOPT_LOW_SPEED_LIMIT, 1024L);
             curl_easy_setopt(single_curl, CURLOPT_LOW_SPEED_TIME, 30L);
             curl_easy_setopt(single_curl, CURLOPT_NOPROGRESS, 0L);
-            curl_easy_setopt(single_curl, CURLOPT_XFERINFOFUNCTION, curl_xferinfo_callback);
+            curl_easy_setopt(single_curl, CURLOPT_XFERINFOFUNCTION, download_xferinfo_callback);
 
             CURLcode res = curl_easy_perform(single_curl);
             if (res != CURLE_OK && res != CURLE_ABORTED_BY_CALLBACK) {
