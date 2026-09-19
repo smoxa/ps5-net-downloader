@@ -1,3 +1,4 @@
+#define CURL_DISABLE_TYPECHECK 1
 #include "downloader.h"
 
 #include <curl/curl.h>

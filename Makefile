@@ -11,8 +11,8 @@ SRCS    := src/main.c src/server.c src/downloader.c
 
 PACBREW := $(PS5_PAYLOAD_SDK)/target/user/homebrew
 
-CFLAGS  += -Wall -Wextra -O2 -Isrc -I$(PACBREW)/include
-LDFLAGS += -L$(PACBREW)/lib -lcurl -lssl -lcrypto -lpsl -lzstd -lz -lpthread
+CFLAGS  += -Wall -Wextra -O2 -Isrc -I$(PACBREW)/include -DCURL_DISABLE_TYPECHECK
+LDFLAGS += -L$(PACBREW)/lib -lcurl -lpsl -lssl -lcrypto -lzstd -lz -lpthread
 
 all: $(ELF)
 
