@@ -41,7 +41,9 @@ static const char INDEX_HTML[] =
 ".btn-primary{background:linear-gradient(135deg,var(--accent),#0084f7);color:#fff;width:100%;margin-top:8px;box-shadow:0 4px 18px var(--accent-glow);}"
 ".btn-primary:hover:not(:disabled){filter:brightness(1.1);transform:translateY(-1px);}"
 ".btn-primary:disabled{opacity:0.5;cursor:not-allowed;}"
-".btn-danger{background:rgba(248,49,47,0.15);color:var(--error);border:1px solid rgba(248,49,47,0.4);margin-top:14px;width:100%;}"
+".btn-danger{background:rgba(248,49,47,0.15);color:var(--error);border:1px solid rgba(248,49,47,0.4);width:100%;}"
+".btn-secondary{background:rgba(140,155,181,0.15);color:var(--text-muted);border:1px solid var(--border);width:100%;}"
+".btn-secondary:hover{background:rgba(140,155,181,0.25);color:var(--text-main);}"
 ".progress-box{display:none;margin-top:10px;}.progress-box.active{display:block;}"
 ".file-info{display:flex;justify-content:space-between;font-size:13px;margin-bottom:8px;word-break:break-all;}"
 ".progress-bar-container{width:100%;height:14px;background:var(--bg-input);border-radius:7px;overflow:hidden;position:relative;}"
@@ -54,7 +56,7 @@ static const char INDEX_HTML[] =
 "</style></head><body><div class=\"container\">"
 "<header><div class=\"brand\"><div class=\"ps-logo\">PS</div><div><h1>Net Downloader</h1><div class=\"subtitle\">Turbo Multi-Threaded Edition</div></div></div><div id=\"statusBadge\" class=\"status-badge idle\">Ожидание</div></header>"
 "<div class=\"card\"><div class=\"card-title\">Новая загрузка</div>"
-"<div class=\"form-group\"><label>Прямая ссылка на файл (HTTP / HTTPS):</label><input type=\"url\" id=\"fileUrl\" placeholder=\"https://tunnel1.dlproxy.uk/.../game.pkg\" required></div>"
+"<div class=\"form-group\"><label>Прямая ссылка на файл (HTTP / HTTPS):</label><input type=\"url\" id=\"fileUrl\" placeholder=\"https://...\" required></div>"
 "<div style=\"display:grid;grid-template-columns:2fr 1fr;gap:12px;\"><div class=\"form-group\"><label>Директория на PS5:</label><input type=\"text\" id=\"savePath\" value=\"/data/pkg/\" placeholder=\"/data/pkg/\"></div>"
 "<div class=\"form-group\"><label>Потоки (Turbo):</label><select id=\"threadsSelect\"><option value=\"4\" selected>4 потока (Turbo)</option><option value=\"8\">8 потоков (Max)</option><option value=\"1\">1 поток (Обычный)</option></select></div></div>"
 "<div class=\"form-group\"><label>Имя файла (опционально):</label><input type=\"text\" id=\"customFilename\" placeholder=\"Автоопределение из ссылки\"></div>"
@@ -66,8 +68,8 @@ static const char INDEX_HTML[] =
 "<div class=\"stat-item\"><div class=\"stat-label\">Скорость</div><div id=\"speedStat\" class=\"stat-value\" style=\"color:#00d2ff;\">0 MB/s</div></div>"
 "<div class=\"stat-item\"><div class=\"stat-label\">Осталось</div><div id=\"etaStat\" class=\"stat-value\">--</div></div>"
 "<div class=\"stat-item\"><div class=\"stat-label\">Статус</div><div id=\"stateStat\" class=\"stat-value\">Подключение...</div></div></div>"
-"<button id=\"abortBtn\" class=\"btn btn-danger\" onclick=\"abortDownload()\">Прервать загрузку</button></div>"
-"<div class=\"card help-box\"><p>• <b>Многопоточность</b>: файл скачивается параллельными кусками через Range-запросы с буфером сокетов 4MB.</p><p>• <b>Автономность</b>: загрузка идёт на самой консоли. ПК можно выключить сразу после нажатия кнопки «Начать».</p></div></div>"
+"<div style=\"display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:14px;\"><button id=\"abortBtn\" class=\"btn btn-danger\" onclick=\"abortDownload()\">Прервать</button><button id=\"resetBtn\" class=\"btn btn-secondary\" onclick=\"resetDownload()\">Сбросить</button></div></div>"
+"<div class=\"card help-box\"><p>• <b>HTTPS / SSL</b>: Полная поддержка защищённых ссылок и автоматических редиректов.</p><p>• <b>Turbo Range</b>: Если сервер поддерживает многопоточность, файл скачивается частями параллельно. Если нет — скачивается одним стабильным потоком.</p></div></div>"
 "<script>"
 "let lastState='';"
 "function formatBytes(b){if(!b||b<=0)return'0 B';const k=1024,s=['B','KB','MB','GB','TB'],i=Math.floor(Math.log(b)/Math.log(k));return parseFloat((b/Math.pow(k,i)).toFixed(2))+' '+s[i];}"
@@ -76,10 +78,10 @@ static const char INDEX_HTML[] =
 "function updateUI(d){const badge=document.getElementById('statusBadge'),card=document.getElementById('progressCard'),btn=document.getElementById('startBtn'),bar=document.getElementById('progressBar'),pText=document.getElementById('percentText'),fName=document.getElementById('currentFileName'),sStat=document.getElementById('sizeStat'),spStat=document.getElementById('speedStat'),etaStat=document.getElementById('etaStat'),stStat=document.getElementById('stateStat'),tBadge=document.getElementById('activeThreadsBadge');"
 "if(d.status==='downloading'){badge.className='status-badge downloading';badge.textContent='Скачивание';card.classList.add('active');btn.disabled=true;"
 "const p=d.total_bytes>0?Math.min(100,(d.downloaded_bytes/d.total_bytes*100)).toFixed(1):0;bar.style.width=p+'%';pText.textContent=p+'%';fName.textContent=d.filename||'Загрузка...';"
-"sStat.textContent=formatBytes(d.downloaded_bytes)+' / '+formatBytes(d.total_bytes);spStat.textContent=(d.speed_bytes_sec/(1024*1024)).toFixed(2)+' MB/s';etaStat.textContent=formatEta(d.eta_seconds);stStat.textContent='В процессе';"
-"const t=d.num_threads||1;tBadge.textContent=t>1?t+' потока (Turbo)':'1 поток';}"
+"sStat.textContent=formatBytes(d.downloaded_bytes)+(d.total_bytes>0?' / '+formatBytes(d.total_bytes):'');spStat.textContent=(d.speed_bytes_sec/(1024*1024)).toFixed(2)+' MB/s';etaStat.textContent=formatEta(d.eta_seconds);stStat.textContent='В процессе';"
+"const t=d.num_threads||1;tBadge.textContent=t>1?t+' потока (Turbo)':'1 поток (Обычный)';}"
 "else if(d.status==='completed'){badge.className='status-badge completed';badge.textContent='Завершено';bar.style.width='100%';pText.textContent='100%';stStat.textContent='Готово!';etaStat.textContent='0 сек';btn.disabled=false;}"
-"else if(d.status==='error'){badge.className='status-badge error';badge.textContent='Ошибка';stStat.textContent=d.error_message||'Сбой';btn.disabled=false;}"
+"else if(d.status==='error'){badge.className='status-badge error';badge.textContent='Ошибка';card.classList.add('active');stStat.textContent=d.error_message||'Сбой';btn.disabled=false;}"
 "else{badge.className='status-badge idle';badge.textContent='Ожидание';card.classList.remove('active');btn.disabled=false;}"
 "lastState=d.status;}"
 "async function startDownload(){const u=document.getElementById('fileUrl').value.trim();if(!u){alert('Введите ссылку');return;}"
@@ -88,6 +90,7 @@ static const char INDEX_HTML[] =
 "const r=await fetch('/api/download',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});"
 "if(!r.ok){const e=await r.json();alert('Ошибка: '+(e.error||r.statusText));return;}document.getElementById('progressCard').classList.add('active');document.getElementById('startBtn').disabled=true;fetchStatus();}"
 "async function abortDownload(){if(!confirm('Прервать загрузку?'))return;await fetch('/api/abort',{method:'POST'});fetchStatus();}"
+"async function resetDownload(){await fetch('/api/reset',{method:'POST'});fetchStatus();}"
 "setInterval(fetchStatus,1000);fetchStatus();"
 "</script></body></html>";
 
@@ -235,6 +238,9 @@ static void handle_client(int client_fd) {
             }
         } else if (strcmp(path, "/api/abort") == 0) {
             downloader_abort();
+            send_response(client_fd, 200, "application/json", "{\"ok\":true}");
+        } else if (strcmp(path, "/api/reset") == 0) {
+            downloader_reset();
             send_response(client_fd, 200, "application/json", "{\"ok\":true}");
         } else {
             send_response(client_fd, 404, "text/plain", "Not Found");

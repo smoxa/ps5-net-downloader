@@ -28,6 +28,7 @@ typedef struct {
 void downloader_init(void);
 int downloader_start(const char *url, const char *save_dir, const char *filename, int threads);
 void downloader_abort(void);
+void downloader_reset(void);
 void downloader_get_status(download_status_t *out_status);
 
 #endif // DOWNLOADER_H

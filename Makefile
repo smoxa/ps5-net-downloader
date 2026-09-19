@@ -10,7 +10,7 @@ ELF     := ps5-net-downloader.elf
 SRCS    := src/main.c src/server.c src/downloader.c
 
 CFLAGS  += -Wall -Wextra -O2 -Isrc
-LDFLAGS += -lpthread
+LDFLAGS += -lpthread -lSceNet -lSceSsl -lSceHttp2
 
 all: $(ELF)
 
