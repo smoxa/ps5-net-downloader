@@ -37,7 +37,7 @@ int main(int argc, char *argv[]) {
     setpriority(PRIO_PROCESS, 0, -20);
 
     printf("========================================\n");
-    printf("  PS5 Net Downloader Turbo Edition v1.5 \n");
+    printf("  PS5 Net Downloader Turbo Edition v1.7 \n");
     printf("========================================\n");
 
     downloader_init();

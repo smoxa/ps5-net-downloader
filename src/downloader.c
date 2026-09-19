@@ -42,6 +42,7 @@ typedef struct {
     uint64_t end_byte;
     uint64_t current_offset;
     uint64_t bytes_downloaded;
+    uint64_t current_chunk_bytes;
     volatile int finished;
     volatile int error;
     char *write_buf;
@@ -69,7 +70,13 @@ static pthread_mutex_t g_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_t g_master_thread;
 static volatile int g_abort_flag = 0;
 static volatile int g_is_running = 0;
-static int g_requested_threads = 4;
+static int g_requested_threads = 8;
+
+// Dynamic Work-Stealing Job Queue
+static pthread_mutex_t g_job_mutex = PTHREAD_MUTEX_INITIALIZER;
+static uint64_t g_job_next_offset = 0;
+static uint64_t g_job_total_size = 0;
+static uint64_t g_job_chunk_size = 32 * 1024 * 1024; // 32 MB dynamic chunks
 
 static double get_time_seconds(void) {
     struct timeval tv;
@@ -261,6 +268,7 @@ static size_t worker_write_callback(char *ptr, size_t size, size_t nmemb, void *
         }
         args->current_offset += total_bytes;
         args->bytes_downloaded += total_bytes;
+        args->current_chunk_bytes += total_bytes;
         return total_bytes;
     }
 
@@ -288,6 +296,7 @@ static size_t worker_write_callback(char *ptr, size_t size, size_t nmemb, void *
     }
 
     args->bytes_downloaded += total_bytes;
+    args->current_chunk_bytes += total_bytes;
     return total_bytes;
 }
 
@@ -371,7 +380,7 @@ static void *parallel_chunk_worker(void *arg) {
     args->finished = 0;
     args->error = 0;
     args->bytes_downloaded = 0;
-    args->current_offset = args->start_byte;
+    args->current_chunk_bytes = 0;
     args->write_buf_len = 0;
 
     args->write_buf = malloc(WORKER_WRITE_BUF_SIZE);
@@ -402,20 +411,14 @@ static void *parallel_chunk_worker(void *arg) {
         return NULL;
     }
 
-    char range_str[64];
-    snprintf(range_str, sizeof(range_str), "%llu-%llu",
-             (unsigned long long)args->start_byte,
-             (unsigned long long)args->end_byte);
-
     curl_easy_setopt(curl, CURLOPT_URL, args->url);
-    curl_easy_setopt(curl, CURLOPT_RANGE, range_str);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, worker_write_callback);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, args);
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 10L);
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
-    curl_easy_setopt(curl, CURLOPT_USERAGENT, "Mozilla/5.0 (PlayStation 5; PS5-Net-Downloader-Turbo/1.5)");
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, "Mozilla/5.0 (PlayStation 5; PS5-Net-Downloader-Turbo/1.7)");
     curl_easy_setopt(curl, CURLOPT_BUFFERSIZE, CHUNK_BUFFER_SIZE);
     curl_easy_setopt(curl, CURLOPT_TCP_NODELAY, 1L);
     curl_easy_setopt(curl, CURLOPT_SOCKOPTFUNCTION, curl_sockopt_cb);
@@ -426,23 +429,80 @@ static void *parallel_chunk_worker(void *arg) {
     curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
     curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, download_xferinfo_callback);
 
+    // Keep-Alive connection reuse across dynamic chunks
+    curl_easy_setopt(curl, CURLOPT_FORBID_REUSE, 0L);
+
     // TLS Ciphers optimization: Prefer ChaCha20-Poly1305 and AES-128 for lowest CPU overhead
     curl_easy_setopt(curl, CURLOPT_SSL_CIPHER_LIST, "ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:HIGH:!aNULL:!MD5:!RC4");
 #ifdef CURLOPT_TLS13_CIPHERS
     curl_easy_setopt(curl, CURLOPT_TLS13_CIPHERS, "TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384");
 #endif
 
-    CURLcode res = curl_easy_perform(curl);
-    if (res != CURLE_OK && res != CURLE_ABORTED_BY_CALLBACK && res != CURLE_WRITE_ERROR) {
-        args->error = 1;
-    }
+    // Dynamic Work-Stealing loop: continuously claim next chunk from queue
+    while (!g_abort_flag) {
+        uint64_t chunk_start = 0;
+        uint64_t chunk_end = 0;
 
-    // Flush any remaining buffered data in RAM
-    if (!args->error && !g_abort_flag && args->write_buf && args->write_buf_len > 0) {
-        ssize_t written = pwrite(args->file_fd, args->write_buf, args->write_buf_len, args->current_offset);
-        if (written != (ssize_t)args->write_buf_len) {
+        pthread_mutex_lock(&g_job_mutex);
+        if (g_job_next_offset >= g_job_total_size) {
+            pthread_mutex_unlock(&g_job_mutex);
+            break; // All dynamic chunks have been assigned!
+        }
+        chunk_start = g_job_next_offset;
+        chunk_end = chunk_start + g_job_chunk_size - 1;
+        if (chunk_end >= g_job_total_size) {
+            chunk_end = g_job_total_size - 1;
+        }
+        g_job_next_offset = chunk_end + 1;
+        pthread_mutex_unlock(&g_job_mutex);
+
+        args->start_byte = chunk_start;
+        args->end_byte = chunk_end;
+
+        char range_str[64];
+        snprintf(range_str, sizeof(range_str), "%llu-%llu",
+                 (unsigned long long)chunk_start,
+                 (unsigned long long)chunk_end);
+        curl_easy_setopt(curl, CURLOPT_RANGE, range_str);
+
+        int chunk_success = 0;
+        for (int attempt = 0; attempt < 3 && !g_abort_flag; attempt++) {
+            if (attempt > 0) {
+                // Roll back progress from failed attempt
+                if (args->current_chunk_bytes > 0) {
+                    if (args->bytes_downloaded >= args->current_chunk_bytes) {
+                        args->bytes_downloaded -= args->current_chunk_bytes;
+                    }
+                }
+                usleep(500000); // 500ms backoff
+            }
+
+            args->current_offset = chunk_start;
+            args->current_chunk_bytes = 0;
+            args->write_buf_len = 0;
+
+            CURLcode res = curl_easy_perform(curl);
+            if (res == CURLE_OK) {
+                chunk_success = 1;
+                break;
+            }
+            if (g_abort_flag || res == CURLE_ABORTED_BY_CALLBACK) {
+                break;
+            }
+        }
+
+        if (!chunk_success && !g_abort_flag) {
             args->error = 1;
-        } else {
+            break;
+        }
+
+        // Flush any remaining buffered data in RAM for this completed chunk
+        if (!args->error && !g_abort_flag && args->write_buf && args->write_buf_len > 0) {
+            ssize_t written = pwrite(args->file_fd, args->write_buf, args->write_buf_len, args->current_offset);
+            if (written != (ssize_t)args->write_buf_len) {
+                args->error = 1;
+                break;
+            }
             args->current_offset += written;
             args->write_buf_len = 0;
         }
@@ -628,7 +688,19 @@ static void *master_download_thread(void *arg) {
             return NULL;
         }
 
-        uint64_t segment_size = total_size / thread_count;
+        pthread_mutex_lock(&g_job_mutex);
+        g_job_total_size = total_size;
+        g_job_next_offset = 0;
+        // Dynamic chunk sizing: default 32 MB, adapt for smaller files so all threads are utilized
+        uint64_t dynamic_chunk = 32 * 1024 * 1024;
+        if (total_size < dynamic_chunk * thread_count * 2) {
+            dynamic_chunk = total_size / (thread_count * 4);
+            if (dynamic_chunk < 2 * 1024 * 1024) {
+                dynamic_chunk = 2 * 1024 * 1024;
+            }
+        }
+        g_job_chunk_size = dynamic_chunk;
+        pthread_mutex_unlock(&g_job_mutex);
 
         for (int i = 0; i < thread_count; i++) {
             args[i].thread_id = i;
@@ -637,10 +709,11 @@ static void *master_download_thread(void *arg) {
             args[i].save_path[sizeof(args[i].save_path) - 1] = '\0';
             strncpy(args[i].url, target_url, sizeof(args[i].url) - 1);
             args[i].url[sizeof(args[i].url) - 1] = '\0';
-            args[i].start_byte = i * segment_size;
-            args[i].end_byte = (i == thread_count - 1) ? (total_size - 1) : ((i + 1) * segment_size - 1);
-            args[i].current_offset = args[i].start_byte;
+            args[i].start_byte = 0;
+            args[i].end_byte = 0;
+            args[i].current_offset = 0;
             args[i].bytes_downloaded = 0;
+            args[i].current_chunk_bytes = 0;
             args[i].finished = 0;
             args[i].error = 0;
 
@@ -872,6 +945,11 @@ void downloader_reset(void) {
         usleep(100000);
         wait_count++;
     }
+
+    pthread_mutex_lock(&g_job_mutex);
+    g_job_next_offset = 0;
+    g_job_total_size = 0;
+    pthread_mutex_unlock(&g_job_mutex);
 
     pthread_mutex_lock(&g_mutex);
     g_abort_flag = 0;
