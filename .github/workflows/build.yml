@@ -35,14 +35,17 @@ jobs:
           unzip -q /tmp/ps5-payload-sdk.zip -d $HOME
           chmod +x $HOME/ps5-payload-sdk/bin/*
 
-          # Setup LLVM_CONFIG
-          if command -v llvm-config-18 >/dev/null 2>&1; then
-            echo "LLVM_CONFIG=llvm-config-18" >> $GITHUB_ENV
-            export LLVM_CONFIG=llvm-config-18
-          elif command -v llvm-config >/dev/null 2>&1; then
-            echo "LLVM_CONFIG=llvm-config" >> $GITHUB_ENV
-            export LLVM_CONFIG=llvm-config
-          fi
+          # Find absolute path of llvm-config
+          LLVM_CONF_BIN="$(command -v llvm-config-18 || command -v llvm-config)"
+          echo "Found LLVM config at: ${LLVM_CONF_BIN}"
+          echo "LLVM_CONFIG=${LLVM_CONF_BIN}" >> $GITHUB_ENV
+
+          # Replace prospero-llvm-config with direct absolute execution to prevent readlink -f relative path resolution bug
+          cat << EOF > $HOME/ps5-payload-sdk/bin/prospero-llvm-config
+          #!/usr/bin/env bash
+          exec "${LLVM_CONF_BIN}" "\$@"
+          EOF
+          chmod +x $HOME/ps5-payload-sdk/bin/prospero-llvm-config
 
           # Ensure clang and clang++ shims route cleanly to host llvm binaries
           cat << 'EOF' > $HOME/ps5-payload-sdk/bin/clang
@@ -72,7 +75,7 @@ jobs:
         run: |
           set -e
           make PS5_PAYLOAD_SDK=$HOME/ps5-payload-sdk
-          ls -la ps5-net-downloader.elf
+          ls -lh ps5-net-downloader.elf
 
       - name: Upload ELF Artifact
         uses: actions/upload-artifact@v4
