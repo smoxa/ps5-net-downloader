@@ -14,9 +14,22 @@
 #include <time.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
 
-#define MAX_THREADS 8
-#define CHUNK_BUFFER_SIZE (512 * 1024L) // 512 KB curl transfer buffer
+#define MAX_THREADS 32
+#define CHUNK_BUFFER_SIZE (1024 * 1024L) // 1 MB buffer for max throughput
+
+static int curl_sockopt_cb(void *clientp, curl_socket_t curlfd, curlsocktype purpose) {
+    (void)clientp;
+    (void)purpose;
+    int rcvbuf = 4 * 1024 * 1024; // 4 MB TCP receive buffer
+    setsockopt(curlfd, SOL_SOCKET, SO_RCVBUF, (const char *)&rcvbuf, sizeof(rcvbuf));
+    int nodelay = 1;
+    setsockopt(curlfd, IPPROTO_TCP, TCP_NODELAY, (const char *)&nodelay, sizeof(nodelay));
+    return CURL_SOCKOPT_OK;
+}
 
 typedef struct {
     int thread_id;
@@ -223,7 +236,7 @@ static size_t worker_write_callback(char *ptr, size_t size, size_t nmemb, void *
     size_t total_bytes = size * nmemb;
 
     if (g_abort_flag) {
-        return 0;
+        return 0; // Abort curl immediately
     }
 
     ssize_t written = pwrite(args->file_fd, ptr, total_bytes, args->current_offset);
@@ -234,10 +247,6 @@ static size_t worker_write_callback(char *ptr, size_t size, size_t nmemb, void *
 
     args->current_offset += total_bytes;
     args->bytes_downloaded += total_bytes;
-
-    pthread_mutex_lock(&g_mutex);
-    g_status.downloaded_bytes += total_bytes;
-    pthread_mutex_unlock(&g_mutex);
 
     return total_bytes;
 }
@@ -289,9 +298,11 @@ static void *parallel_chunk_worker(void *arg) {
     curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 10L);
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
-    curl_easy_setopt(curl, CURLOPT_USERAGENT, "Mozilla/5.0 (PlayStation 5; PS5-Net-Downloader-Turbo/1.4)");
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, "Mozilla/5.0 (PlayStation 5; PS5-Net-Downloader-Turbo/1.5)");
     curl_easy_setopt(curl, CURLOPT_BUFFERSIZE, CHUNK_BUFFER_SIZE);
     curl_easy_setopt(curl, CURLOPT_TCP_NODELAY, 1L);
+    curl_easy_setopt(curl, CURLOPT_SOCKOPTFUNCTION, curl_sockopt_cb);
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 15L);
     curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1024L);
     curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 30L);
@@ -299,7 +310,7 @@ static void *parallel_chunk_worker(void *arg) {
     curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, download_xferinfo_callback);
 
     CURLcode res = curl_easy_perform(curl);
-    if (res != CURLE_OK && res != CURLE_ABORTED_BY_CALLBACK) {
+    if (res != CURLE_OK && res != CURLE_ABORTED_BY_CALLBACK && res != CURLE_WRITE_ERROR) {
         args->error = 1;
     }
 
@@ -310,6 +321,8 @@ static void *parallel_chunk_worker(void *arg) {
 
 static void *master_download_thread(void *arg) {
     (void)arg;
+    pthread_detach(pthread_self()); // Auto free thread resources upon exit
+
     char target_url[2048];
 
     pthread_mutex_lock(&g_mutex);
@@ -344,7 +357,9 @@ static void *master_download_thread(void *arg) {
     curl_easy_setopt(probe_curl, CURLOPT_MAXREDIRS, 10L);
     curl_easy_setopt(probe_curl, CURLOPT_SSL_VERIFYPEER, 0L);
     curl_easy_setopt(probe_curl, CURLOPT_SSL_VERIFYHOST, 0L);
-    curl_easy_setopt(probe_curl, CURLOPT_USERAGENT, "Mozilla/5.0 (PlayStation 5; PS5-Net-Downloader-Turbo/1.4)");
+    curl_easy_setopt(probe_curl, CURLOPT_USERAGENT, "Mozilla/5.0 (PlayStation 5; PS5-Net-Downloader-Turbo/1.5)");
+    curl_easy_setopt(probe_curl, CURLOPT_SOCKOPTFUNCTION, curl_sockopt_cb);
+    curl_easy_setopt(probe_curl, CURLOPT_NOSIGNAL, 1L);
     curl_easy_setopt(probe_curl, CURLOPT_HEADERFUNCTION, probe_header_callback);
     curl_easy_setopt(probe_curl, CURLOPT_HEADERDATA, &probe_info);
     curl_easy_setopt(probe_curl, CURLOPT_WRITEFUNCTION, probe_write_dummy_callback);
@@ -453,8 +468,21 @@ static void *master_download_thread(void *arg) {
 
     if (thread_count > 1 && total_size > 0) {
         // Multi-threaded parallel download via libcurl
-        pthread_t threads[MAX_THREADS];
-        worker_args_t args[MAX_THREADS];
+        pthread_t *threads = calloc(thread_count, sizeof(pthread_t));
+        worker_args_t *args = calloc(thread_count, sizeof(worker_args_t));
+        if (!threads || !args) {
+            free(threads);
+            free(args);
+            close(file_fd);
+            pthread_mutex_lock(&g_mutex);
+            g_status.state = STATUS_ERROR;
+            snprintf(g_status.error_message, sizeof(g_status.error_message), "Memory allocation failed for %d workers", thread_count);
+            g_is_running = 0;
+            g_abort_flag = 0;
+            pthread_mutex_unlock(&g_mutex);
+            return NULL;
+        }
+
         uint64_t segment_size = total_size / thread_count;
 
         for (int i = 0; i < thread_count; i++) {
@@ -473,10 +501,26 @@ static void *master_download_thread(void *arg) {
         }
 
         while (!g_abort_flag) {
-            usleep(250000); // 250 ms update
+            usleep(100000); // 100 ms polling
+
+            uint64_t current_dl = 0;
+            int all_done = 1;
+            int any_alive = 0;
+            int any_error = 0;
+
+            for (int i = 0; i < thread_count; i++) {
+                current_dl += args[i].bytes_downloaded;
+                if (!args[i].finished) {
+                    all_done = 0;
+                    any_alive = 1;
+                }
+                if (args[i].error) {
+                    any_error = 1;
+                }
+            }
 
             pthread_mutex_lock(&g_mutex);
-            uint64_t current_dl = g_status.downloaded_bytes;
+            g_status.downloaded_bytes = current_dl;
             double now = get_time_seconds();
             double elapsed = now - last_speed_time;
 
@@ -494,17 +538,12 @@ static void *master_download_thread(void *arg) {
                 }
             }
 
-            int all_done = (total_size > 0 && current_dl >= total_size);
+            if (total_size > 0 && current_dl >= total_size) {
+                all_done = 1;
+            }
             pthread_mutex_unlock(&g_mutex);
 
             if (all_done) break;
-
-            int any_alive = 0;
-            int any_error = 0;
-            for (int i = 0; i < thread_count; i++) {
-                if (!args[i].finished) any_alive = 1;
-                if (args[i].error) any_error = 1;
-            }
 
             if (any_error) {
                 pthread_mutex_lock(&g_mutex);
@@ -520,6 +559,9 @@ static void *master_download_thread(void *arg) {
         for (int i = 0; i < thread_count; i++) {
             pthread_join(threads[i], NULL);
         }
+
+        free(threads);
+        free(args);
     } else {
         // Single-stream download via libcurl (handles servers without Range support like VikingFile)
         CURL *single_curl = curl_easy_init();
@@ -531,9 +573,11 @@ static void *master_download_thread(void *arg) {
             curl_easy_setopt(single_curl, CURLOPT_MAXREDIRS, 10L);
             curl_easy_setopt(single_curl, CURLOPT_SSL_VERIFYPEER, 0L);
             curl_easy_setopt(single_curl, CURLOPT_SSL_VERIFYHOST, 0L);
-            curl_easy_setopt(single_curl, CURLOPT_USERAGENT, "Mozilla/5.0 (PlayStation 5; PS5-Net-Downloader-Turbo/1.4)");
+            curl_easy_setopt(single_curl, CURLOPT_USERAGENT, "Mozilla/5.0 (PlayStation 5; PS5-Net-Downloader-Turbo/1.5)");
             curl_easy_setopt(single_curl, CURLOPT_BUFFERSIZE, CHUNK_BUFFER_SIZE);
             curl_easy_setopt(single_curl, CURLOPT_TCP_NODELAY, 1L);
+            curl_easy_setopt(single_curl, CURLOPT_SOCKOPTFUNCTION, curl_sockopt_cb);
+            curl_easy_setopt(single_curl, CURLOPT_NOSIGNAL, 1L);
             curl_easy_setopt(single_curl, CURLOPT_CONNECTTIMEOUT, 15L);
             curl_easy_setopt(single_curl, CURLOPT_LOW_SPEED_LIMIT, 1024L);
             curl_easy_setopt(single_curl, CURLOPT_LOW_SPEED_TIME, 30L);
@@ -541,7 +585,7 @@ static void *master_download_thread(void *arg) {
             curl_easy_setopt(single_curl, CURLOPT_XFERINFOFUNCTION, download_xferinfo_callback);
 
             CURLcode res = curl_easy_perform(single_curl);
-            if (res != CURLE_OK && res != CURLE_ABORTED_BY_CALLBACK) {
+            if (res != CURLE_OK && res != CURLE_ABORTED_BY_CALLBACK && res != CURLE_WRITE_ERROR) {
                 pthread_mutex_lock(&g_mutex);
                 g_status.state = STATUS_ERROR;
                 snprintf(g_status.error_message, sizeof(g_status.error_message), "Download failed: %s", curl_easy_strerror(res));
@@ -557,6 +601,8 @@ static void *master_download_thread(void *arg) {
     pthread_mutex_lock(&g_mutex);
     if (g_abort_flag) {
         g_status.state = STATUS_IDLE;
+        g_status.speed_bytes_sec = 0.0;
+        g_status.eta_seconds = 0;
         unlink(g_status.save_path);
     } else if (g_status.state != STATUS_ERROR) {
         if (total_size > 0 && g_status.downloaded_bytes < total_size) {
@@ -570,6 +616,7 @@ static void *master_download_thread(void *arg) {
         }
     }
     g_is_running = 0;
+    g_abort_flag = 0;
     pthread_mutex_unlock(&g_mutex);
 
     return NULL;
@@ -581,7 +628,7 @@ void downloader_init(void) {
     g_status.state = STATUS_IDLE;
     g_abort_flag = 0;
     g_is_running = 0;
-    g_requested_threads = 4;
+    g_requested_threads = 16;
     pthread_mutex_unlock(&g_mutex);
 
     curl_global_init(CURL_GLOBAL_ALL);
@@ -589,6 +636,15 @@ void downloader_init(void) {
 
 int downloader_start(const char *url, const char *save_dir, const char *filename, int threads) {
     pthread_mutex_lock(&g_mutex);
+    // If previous download was aborting, wait up to 3 seconds for workers to exit cleanly
+    int wait_count = 0;
+    while (g_is_running && g_abort_flag && wait_count < 30) {
+        pthread_mutex_unlock(&g_mutex);
+        usleep(100000);
+        pthread_mutex_lock(&g_mutex);
+        wait_count++;
+    }
+
     if (g_is_running) {
         pthread_mutex_unlock(&g_mutex);
         return -1;
@@ -596,7 +652,7 @@ int downloader_start(const char *url, const char *save_dir, const char *filename
 
     g_abort_flag = 0;
     g_is_running = 1;
-    g_requested_threads = (threads >= 1 && threads <= MAX_THREADS) ? threads : 4;
+    g_requested_threads = (threads >= 1 && threads <= MAX_THREADS) ? threads : 16;
 
     strncpy(g_status.url, url, sizeof(g_status.url) - 1);
     g_status.url[sizeof(g_status.url) - 1] = '\0';
@@ -622,13 +678,27 @@ void downloader_abort(void) {
     pthread_mutex_lock(&g_mutex);
     if (g_is_running) {
         g_abort_flag = 1;
+        g_status.state = STATUS_ABORTING;
     }
     pthread_mutex_unlock(&g_mutex);
 }
 
 void downloader_reset(void) {
     pthread_mutex_lock(&g_mutex);
-    g_abort_flag = 1;
+    if (g_is_running) {
+        g_abort_flag = 1;
+        g_status.state = STATUS_ABORTING;
+    }
+    pthread_mutex_unlock(&g_mutex);
+
+    int wait_count = 0;
+    while (g_is_running && wait_count < 20) {
+        usleep(100000);
+        wait_count++;
+    }
+
+    pthread_mutex_lock(&g_mutex);
+    g_abort_flag = 0;
     g_is_running = 0;
     g_status.state = STATUS_IDLE;
     g_status.error_message[0] = '\0';

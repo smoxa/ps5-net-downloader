@@ -8,6 +8,7 @@ typedef enum {
     STATUS_IDLE = 0,
     STATUS_CONNECTING,
     STATUS_DOWNLOADING,
+    STATUS_ABORTING,
     STATUS_COMPLETED,
     STATUS_ERROR
 } download_state_t;

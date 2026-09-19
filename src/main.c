@@ -27,9 +27,12 @@ int main(int argc, char *argv[]) {
 
     signal(SIGINT, handle_signal);
     signal(SIGTERM, handle_signal);
+#ifdef SIGPIPE
+    signal(SIGPIPE, SIG_IGN);
+#endif
 
     printf("========================================\n");
-    printf("  PS5 Net Downloader Turbo Edition v1.4 \n");
+    printf("  PS5 Net Downloader Turbo Edition v1.5 \n");
     printf("========================================\n");
 
     downloader_init();
