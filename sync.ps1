@@ -4,6 +4,9 @@ param (
 
 # Refresh PATH to ensure git is accessible
 $env:PATH = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+if (Test-Path "C:\Program Files\Git\cmd") {
+    $env:PATH += ";C:\Program Files\Git\cmd"
+}
 
 if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
     Write-Host "Error: Git is not found in PATH." -ForegroundColor Red

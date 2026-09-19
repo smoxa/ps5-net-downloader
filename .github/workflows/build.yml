@@ -71,6 +71,18 @@ jobs:
           echo "PS5_PAYLOAD_SDK=$HOME/ps5-payload-sdk" >> $GITHUB_ENV
           echo "$HOME/ps5-payload-sdk/bin" >> $GITHUB_PATH
 
+      - name: Setup PacBrew Dependencies (libcurl, OpenSSL)
+        run: |
+          mkdir -p /tmp/pacbrew/out
+          curl -sL -o /tmp/pacbrew/ps5-payload-dev.tar.gz https://github.com/ps5-payload-dev/pacbrew-repo/releases/download/v0.40.2/ps5-payload-dev.tar.gz
+          tar -xzf /tmp/pacbrew/ps5-payload-dev.tar.gz -C /tmp/pacbrew/out
+          HBREW_SRC=$(find /tmp/pacbrew/out -type d -name "homebrew" | head -n 1)
+          echo "Found homebrew at: $HBREW_SRC"
+          mkdir -p $HOME/ps5-payload-sdk/target/user/homebrew
+          cp -r $HBREW_SRC/* $HOME/ps5-payload-sdk/target/user/homebrew/
+          ls -lh $HOME/ps5-payload-sdk/target/user/homebrew/lib/libcurl.a
+          ls -lh $HOME/ps5-payload-sdk/target/user/homebrew/include/curl/curl.h
+
       - name: Build Net Downloader ELF
         run: |
           set -e

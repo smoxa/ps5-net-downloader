@@ -1,8 +1,10 @@
 #include "downloader.h"
 
+#include <curl/curl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <unistd.h>
 #include <pthread.h>
 #include <sys/types.h>
@@ -12,56 +14,27 @@
 #include <fcntl.h>
 #include <errno.h>
 
-// Sony PS5 native library function declarations (libSceNet, libSceSsl, libSceHttp)
-int sceNetInit(void);
-int sceNetPoolCreate(const char *name, int size, int flags);
-int sceNetPoolDestroy(int memId);
-
-int sceSslInit(size_t poolSize);
-int sceSslTerm(int sslCtxId);
-
-int sceHttpInit(int netMemId, int sslCtxId, size_t poolSize);
-int sceHttpTerm(int httpCtxId);
-
-int sceHttpCreateTemplate(int httpCtxId, const char *userAgent, int httpVer, int autoRedirect);
-int sceHttpDeleteTemplate(int tmplId);
-
-int sceHttpsSetSslCallback(int tmplId, void *cb, void *userArg);
-int sceHttpSetResponseHeaderMaxSize(int tmplId, size_t size);
-
-int sceHttpCreateConnectionWithURL(int tmplId, const char *url, int is_keepalive);
-int sceHttpDeleteConnection(int connId);
-
-int sceHttpCreateRequestWithURL(int connId, int method, const char *url, uint64_t contentLength);
-int sceHttpDeleteRequest(int reqId);
-
-int sceHttpSendRequest(int reqId, const void *data, size_t size);
-int sceHttpGetStatusCode(int reqId, int *statusCode);
-int sceHttpGetResponseContentLength(int reqId, int *hasContentLength, uint64_t *contentLength);
-int sceHttpGetAllResponseHeaders(int reqId, char **headers, size_t *size);
-int sceHttpReadData(int reqId, void *buf, size_t size);
-int sceHttpAbortRequest(int reqId);
-int sceHttpAddRequestHeader(int reqId, const char *name, const char *value, int mode);
-int sceHttpSetConnectTimeOut(int id, unsigned int timeout_usec);
-int sceHttpSetRecvTimeOut(int id, unsigned int timeout_usec);
-int sceHttpSetSendTimeOut(int id, unsigned int timeout_usec);
-
-#define CHUNK_BUFFER_SIZE (512 * 1024) // 512 KB read buffer
 #define MAX_THREADS 8
+#define CHUNK_BUFFER_SIZE (512 * 1024L) // 512 KB curl transfer buffer
 
 typedef struct {
     int thread_id;
-    int tmpl_id;
     int file_fd;
     char url[2048];
     uint64_t start_byte;
     uint64_t end_byte;
+    uint64_t current_offset;
     uint64_t bytes_downloaded;
     volatile int finished;
     volatile int error;
-    int conn_id;
-    int req_id;
 } worker_args_t;
+
+typedef struct {
+    uint64_t total_size;
+    int supports_range;
+    int status_code;
+    char filename[256];
+} probe_info_t;
 
 static download_status_t g_status;
 static pthread_mutex_t g_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -69,11 +42,6 @@ static pthread_t g_master_thread;
 static volatile int g_abort_flag = 0;
 static volatile int g_is_running = 0;
 static int g_requested_threads = 4;
-
-static int g_libnet_pool = -1;
-static int g_libssl_ctx  = -1;
-static int g_libhttp_ctx = -1;
-static int g_tmpl_id     = -1;
 
 static double get_time_seconds(void) {
     struct timeval tv;
@@ -147,7 +115,7 @@ static void extract_filename_from_url(const char *url, char *out_filename, size_
 static int extract_filename_from_headers(const char *headers, char *out_filename, size_t max_len) {
     if (!headers) return 0;
     const char *cd = strcasestr(headers, "Content-Disposition:");
-    if (!cd) return 0;
+    if (!cd) cd = headers;
 
     const char *fn_pos = strcasestr(cd, "filename*=");
     if (fn_pos) {
@@ -195,45 +163,102 @@ static int extract_filename_from_headers(const char *headers, char *out_filename
     return 0;
 }
 
-static int http_ssl_cb(void) {
-    // Return 0 to accept all SSL certificates without verification errors
+static size_t probe_header_callback(char *buffer, size_t size, size_t nitems, void *userdata) {
+    size_t total = size * nitems;
+    probe_info_t *info = (probe_info_t *)userdata;
+
+    char header[1024];
+    size_t copy_len = (total < sizeof(header) - 1) ? total : sizeof(header) - 1;
+    memcpy(header, buffer, copy_len);
+    header[copy_len] = '\0';
+
+    if (strncasecmp(header, "HTTP/", 5) == 0) {
+        int code = 0;
+        if (sscanf(header, "HTTP/%*f %d", &code) == 1) {
+            info->status_code = code;
+            if (code == 206) {
+                info->supports_range = 1;
+            }
+        }
+    } else if (strncasecmp(header, "Content-Range:", 14) == 0) {
+        info->supports_range = 1;
+        char *slash = strchr(header, '/');
+        if (slash) {
+            info->total_size = strtoull(slash + 1, NULL, 10);
+        }
+    } else if (strncasecmp(header, "Content-Length:", 15) == 0) {
+        if (info->total_size == 0) {
+            info->total_size = strtoull(header + 15, NULL, 10);
+        }
+    } else if (strncasecmp(header, "Accept-Ranges: bytes", 20) == 0) {
+        info->supports_range = 1;
+    } else if (strncasecmp(header, "Content-Disposition:", 20) == 0) {
+        extract_filename_from_headers(header, info->filename, sizeof(info->filename));
+    }
+
+    return total;
+}
+
+static size_t probe_write_dummy_callback(char *ptr, size_t size, size_t nmemb, void *userdata) {
+    (void)ptr;
+    (void)userdata;
+    return size * nmemb;
+}
+
+static int curl_xferinfo_callback(void *clientp, curl_off_t dltotal, curl_off_t dlnow, curl_off_t ultotal, curl_off_t ulnow) {
+    (void)clientp;
+    (void)dltotal;
+    (void)dlnow;
+    (void)ultotal;
+    (void)ulnow;
+    if (g_abort_flag) {
+        return 1; // Abort transfer immediately
+    }
     return 0;
 }
 
-static int init_sony_http(void) {
-    if (g_tmpl_id >= 0) return 0;
+static size_t worker_write_callback(char *ptr, size_t size, size_t nmemb, void *userdata) {
+    worker_args_t *args = (worker_args_t *)userdata;
+    size_t total_bytes = size * nmemb;
 
-    sceNetInit();
-
-    if (g_libnet_pool < 0) {
-        g_libnet_pool = sceNetPoolCreate("ps5_nd_net", 64 * 1024, 0);
+    if (g_abort_flag) {
+        return 0;
     }
 
-    if (g_libssl_ctx < 0) {
-        g_libssl_ctx = sceSslInit(256 * 1024);
+    ssize_t written = pwrite(args->file_fd, ptr, total_bytes, args->current_offset);
+    if (written != (ssize_t)total_bytes) {
+        args->error = 1;
+        return 0; // Signal write failure to curl
     }
 
-    if (g_libhttp_ctx < 0) {
-        g_libhttp_ctx = sceHttpInit(g_libnet_pool, g_libssl_ctx, 128 * 1024);
-        if (g_libhttp_ctx < 0) {
-            return -1;
-        }
+    args->current_offset += total_bytes;
+    args->bytes_downloaded += total_bytes;
+
+    pthread_mutex_lock(&g_mutex);
+    g_status.downloaded_bytes += total_bytes;
+    pthread_mutex_unlock(&g_mutex);
+
+    return total_bytes;
+}
+
+static size_t single_stream_write_callback(char *ptr, size_t size, size_t nmemb, void *userdata) {
+    int file_fd = *(int *)userdata;
+    size_t total_bytes = size * nmemb;
+
+    if (g_abort_flag) {
+        return 0;
     }
 
-    // HTTP version: 2 (HTTP/1.1), autoRedirect: 1 (automatic 301/302/307 redirects)
-    g_tmpl_id = sceHttpCreateTemplate(g_libhttp_ctx, "PS5-Net-Downloader-Turbo/1.3", 2, 1);
-    if (g_tmpl_id < 0) {
-        return -1;
+    ssize_t written = write(file_fd, ptr, total_bytes);
+    if (written != (ssize_t)total_bytes) {
+        return 0;
     }
 
-    sceHttpSetResponseHeaderMaxSize(g_tmpl_id, 0x4000);
-    sceHttpsSetSslCallback(g_tmpl_id, (void *)http_ssl_cb, NULL);
+    pthread_mutex_lock(&g_mutex);
+    g_status.downloaded_bytes += total_bytes;
+    pthread_mutex_unlock(&g_mutex);
 
-    sceHttpSetConnectTimeOut(g_tmpl_id, 15 * 1000 * 1000);
-    sceHttpSetRecvTimeOut(g_tmpl_id, 30 * 1000 * 1000);
-    sceHttpSetSendTimeOut(g_tmpl_id, 15 * 1000 * 1000);
-
-    return 0;
+    return total_bytes;
 }
 
 static void *parallel_chunk_worker(void *arg) {
@@ -241,89 +266,43 @@ static void *parallel_chunk_worker(void *arg) {
     args->finished = 0;
     args->error = 0;
     args->bytes_downloaded = 0;
+    args->current_offset = args->start_byte;
 
-    int conn = sceHttpCreateConnectionWithURL(args->tmpl_id, args->url, 0);
-    if (conn < 0) {
+    CURL *curl = curl_easy_init();
+    if (!curl) {
         args->error = 1;
         args->finished = 1;
         return NULL;
     }
-    args->conn_id = conn;
 
-    int req = sceHttpCreateRequestWithURL(conn, 0, args->url, 0); // 0 = GET
-    if (req < 0) {
-        sceHttpDeleteConnection(conn);
-        args->error = 1;
-        args->finished = 1;
-        return NULL;
-    }
-    args->req_id = req;
-
-    char range_val[64];
-    snprintf(range_val, sizeof(range_val), "bytes=%llu-%llu",
+    char range_str[64];
+    snprintf(range_str, sizeof(range_str), "%llu-%llu",
              (unsigned long long)args->start_byte,
              (unsigned long long)args->end_byte);
-    sceHttpAddRequestHeader(req, "Range", range_val, 0);
 
-    if (sceHttpSendRequest(req, NULL, 0) != 0) {
-        sceHttpDeleteRequest(req);
-        sceHttpDeleteConnection(conn);
+    curl_easy_setopt(curl, CURLOPT_URL, args->url);
+    curl_easy_setopt(curl, CURLOPT_RANGE, range_str);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, worker_write_callback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, args);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 10L);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, "Mozilla/5.0 (PlayStation 5; PS5-Net-Downloader-Turbo/1.4)");
+    curl_easy_setopt(curl, CURLOPT_BUFFERSIZE, CHUNK_BUFFER_SIZE);
+    curl_easy_setopt(curl, CURLOPT_TCP_NODELAY, 1L);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 15L);
+    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1024L);
+    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 30L);
+    curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+    curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, curl_xferinfo_callback);
+
+    CURLcode res = curl_easy_perform(curl);
+    if (res != CURLE_OK && res != CURLE_ABORTED_BY_CALLBACK) {
         args->error = 1;
-        args->finished = 1;
-        return NULL;
     }
 
-    int status_code = 0;
-    sceHttpGetStatusCode(req, &status_code);
-    if (status_code != 200 && status_code != 206) {
-        sceHttpDeleteRequest(req);
-        sceHttpDeleteConnection(conn);
-        args->error = 1;
-        args->finished = 1;
-        return NULL;
-    }
-
-    char *buf = malloc(CHUNK_BUFFER_SIZE);
-    if (!buf) {
-        sceHttpDeleteRequest(req);
-        sceHttpDeleteConnection(conn);
-        args->error = 1;
-        args->finished = 1;
-        return NULL;
-    }
-
-    uint64_t current_offset = args->start_byte;
-    uint64_t total_expected = (args->end_byte - args->start_byte) + 1;
-
-    while (!g_abort_flag && args->bytes_downloaded < total_expected) {
-        size_t to_read = CHUNK_BUFFER_SIZE;
-        if (to_read > (total_expected - args->bytes_downloaded)) {
-            to_read = total_expected - args->bytes_downloaded;
-        }
-
-        int n = sceHttpReadData(req, buf, to_read);
-        if (n <= 0) {
-            if (n < 0) args->error = 1;
-            break;
-        }
-
-        ssize_t written = pwrite(args->file_fd, buf, n, current_offset);
-        if (written != n) {
-            args->error = 1;
-            break;
-        }
-
-        current_offset += n;
-        args->bytes_downloaded += n;
-
-        pthread_mutex_lock(&g_mutex);
-        g_status.downloaded_bytes += n;
-        pthread_mutex_unlock(&g_mutex);
-    }
-
-    free(buf);
-    sceHttpDeleteRequest(req);
-    sceHttpDeleteConnection(conn);
+    curl_easy_cleanup(curl);
     args->finished = 1;
     return NULL;
 }
@@ -344,106 +323,99 @@ static void *master_download_thread(void *arg) {
     target_url[sizeof(target_url) - 1] = '\0';
     pthread_mutex_unlock(&g_mutex);
 
-    if (init_sony_http() != 0) {
+    // Step 1: Probe URL with curl to determine Range support, size, and redirects
+    CURL *probe_curl = curl_easy_init();
+    if (!probe_curl) {
         pthread_mutex_lock(&g_mutex);
         g_status.state = STATUS_ERROR;
-        snprintf(g_status.error_message, sizeof(g_status.error_message), "Failed to initialize native PS5 HTTP subsystem");
+        snprintf(g_status.error_message, sizeof(g_status.error_message), "Failed to initialize libcurl");
         g_is_running = 0;
         pthread_mutex_unlock(&g_mutex);
         return NULL;
     }
 
-    // Step 1: Probe URL with Range: bytes=0-0 to check range support, size, and filename
-    int probe_conn = sceHttpCreateConnectionWithURL(g_tmpl_id, target_url, 0);
-    if (probe_conn < 0) {
-        pthread_mutex_lock(&g_mutex);
-        g_status.state = STATUS_ERROR;
-        snprintf(g_status.error_message, sizeof(g_status.error_message), "Failed to create connection (code %d)", probe_conn);
-        g_is_running = 0;
-        pthread_mutex_unlock(&g_mutex);
-        return NULL;
+    probe_info_t probe_info;
+    memset(&probe_info, 0, sizeof(probe_info));
+
+    curl_easy_setopt(probe_curl, CURLOPT_URL, target_url);
+    curl_easy_setopt(probe_curl, CURLOPT_RANGE, "0-0");
+    curl_easy_setopt(probe_curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(probe_curl, CURLOPT_MAXREDIRS, 10L);
+    curl_easy_setopt(probe_curl, CURLOPT_SSL_VERIFYPEER, 0L);
+    curl_easy_setopt(probe_curl, CURLOPT_SSL_VERIFYHOST, 0L);
+    curl_easy_setopt(probe_curl, CURLOPT_USERAGENT, "Mozilla/5.0 (PlayStation 5; PS5-Net-Downloader-Turbo/1.4)");
+    curl_easy_setopt(probe_curl, CURLOPT_HEADERFUNCTION, probe_header_callback);
+    curl_easy_setopt(probe_curl, CURLOPT_HEADERDATA, &probe_info);
+    curl_easy_setopt(probe_curl, CURLOPT_WRITEFUNCTION, probe_write_dummy_callback);
+    curl_easy_setopt(probe_curl, CURLOPT_CONNECTTIMEOUT, 15L);
+    curl_easy_setopt(probe_curl, CURLOPT_TIMEOUT, 20L);
+
+    CURLcode probe_res = curl_easy_perform(probe_curl);
+
+    // If Range probe failed or returned an error, retry with simple HEAD request
+    if (probe_res != CURLE_OK || (probe_info.status_code != 200 && probe_info.status_code != 206)) {
+        curl_easy_setopt(probe_curl, CURLOPT_RANGE, NULL);
+        curl_easy_setopt(probe_curl, CURLOPT_NOBODY, 1L);
+        probe_res = curl_easy_perform(probe_curl);
     }
 
-    int probe_req = sceHttpCreateRequestWithURL(probe_conn, 0, target_url, 0);
-    if (probe_req < 0) {
-        sceHttpDeleteConnection(probe_conn);
-        pthread_mutex_lock(&g_mutex);
-        g_status.state = STATUS_ERROR;
-        snprintf(g_status.error_message, sizeof(g_status.error_message), "Failed to create request (code %d)", probe_req);
-        g_is_running = 0;
-        pthread_mutex_unlock(&g_mutex);
-        return NULL;
+    // Get final resolved URL after redirects
+    char *effective_url = NULL;
+    curl_easy_getinfo(probe_curl, CURLINFO_EFFECTIVE_URL, &effective_url);
+    if (effective_url && strlen(effective_url) > 0) {
+        strncpy(target_url, effective_url, sizeof(target_url) - 1);
+        target_url[sizeof(target_url) - 1] = '\0';
     }
 
-    sceHttpAddRequestHeader(probe_req, "Range", "bytes=0-0", 0);
-
-    if (sceHttpSendRequest(probe_req, NULL, 0) != 0) {
-        sceHttpDeleteRequest(probe_req);
-        sceHttpDeleteConnection(probe_conn);
-        pthread_mutex_lock(&g_mutex);
-        g_status.state = STATUS_ERROR;
-        snprintf(g_status.error_message, sizeof(g_status.error_message), "Connection failed or SSL handshake error");
-        g_is_running = 0;
-        pthread_mutex_unlock(&g_mutex);
-        return NULL;
+    // Get final HTTP status code
+    long http_code = 0;
+    curl_easy_getinfo(probe_curl, CURLINFO_RESPONSE_CODE, &http_code);
+    if (http_code > 0) {
+        probe_info.status_code = (int)http_code;
     }
 
-    int status_code = 0;
-    sceHttpGetStatusCode(probe_req, &status_code);
-
-    uint64_t total_size = 0;
-    int has_cl = 0;
-    sceHttpGetResponseContentLength(probe_req, &has_cl, &total_size);
-
-    char *raw_headers = NULL;
-    size_t headers_sz = 0;
-    sceHttpGetAllResponseHeaders(probe_req, &raw_headers, &headers_sz);
-
-    int supports_range = (status_code == 206);
-
-    if (raw_headers) {
-        char *cr_pos = strcasestr(raw_headers, "Content-Range:");
-        if (cr_pos) {
-            char *slash = strchr(cr_pos, '/');
-            if (slash) {
-                total_size = strtoull(slash + 1, NULL, 10);
-                supports_range = 1;
-            }
-        }
-
-        if (total_size == 0) {
-            char *cl_pos = strcasestr(raw_headers, "Content-Length:");
-            if (cl_pos) {
-                total_size = strtoull(cl_pos + 15, NULL, 10);
-            }
-        }
-
-        char header_fn[256];
-        if (extract_filename_from_headers(raw_headers, header_fn, sizeof(header_fn))) {
-            pthread_mutex_lock(&g_mutex);
-            int is_auto_name = (strstr(g_status.filename, "download_") != NULL || (strstr(g_status.filename, ".pkg") != NULL && strlen(g_status.filename) < 12));
-            if (is_auto_name || g_status.filename[0] == '\0') {
-                strncpy(g_status.filename, header_fn, sizeof(g_status.filename) - 1);
-                char *last_sl = strrchr(g_status.save_path, '/');
-                if (last_sl) {
-                    *(last_sl + 1) = '\0';
-                    strncat(g_status.save_path, g_status.filename, sizeof(g_status.save_path) - strlen(g_status.save_path) - 1);
-                }
-            }
-            pthread_mutex_unlock(&g_mutex);
+    // Get content length via curl if not already parsed
+    if (probe_info.total_size == 0) {
+        curl_off_t cl = 0;
+        curl_easy_getinfo(probe_curl, CURLINFO_CONTENT_LENGTH_DOWNLOAD_T, &cl);
+        if (cl > 0) {
+            probe_info.total_size = (uint64_t)cl;
         }
     }
 
-    sceHttpDeleteRequest(probe_req);
-    sceHttpDeleteConnection(probe_conn);
+    curl_easy_cleanup(probe_curl);
 
-    if (status_code != 200 && status_code != 206) {
+    if (probe_res != CURLE_OK && probe_info.total_size == 0 && probe_info.status_code == 0) {
         pthread_mutex_lock(&g_mutex);
         g_status.state = STATUS_ERROR;
-        snprintf(g_status.error_message, sizeof(g_status.error_message), "Server returned HTTP status %d", status_code);
+        snprintf(g_status.error_message, sizeof(g_status.error_message), "Network error: %s", curl_easy_strerror(probe_res));
         g_is_running = 0;
         pthread_mutex_unlock(&g_mutex);
         return NULL;
+    }
+
+    if (probe_info.status_code >= 400) {
+        pthread_mutex_lock(&g_mutex);
+        g_status.state = STATUS_ERROR;
+        snprintf(g_status.error_message, sizeof(g_status.error_message), "Server returned HTTP status %d", probe_info.status_code);
+        g_is_running = 0;
+        pthread_mutex_unlock(&g_mutex);
+        return NULL;
+    }
+
+    // Check if filename was extracted from Content-Disposition
+    if (probe_info.filename[0] != '\0') {
+        pthread_mutex_lock(&g_mutex);
+        int is_auto_name = (strstr(g_status.filename, "download_") != NULL || (strstr(g_status.filename, ".pkg") != NULL && strlen(g_status.filename) < 12));
+        if (is_auto_name || g_status.filename[0] == '\0') {
+            strncpy(g_status.filename, probe_info.filename, sizeof(g_status.filename) - 1);
+            char *last_sl = strrchr(g_status.save_path, '/');
+            if (last_sl) {
+                *(last_sl + 1) = '\0';
+                strncat(g_status.save_path, g_status.filename, sizeof(g_status.save_path) - strlen(g_status.save_path) - 1);
+            }
+        }
+        pthread_mutex_unlock(&g_mutex);
     }
 
     // Step 2: Open target file
@@ -457,13 +429,14 @@ static void *master_download_thread(void *arg) {
         return NULL;
     }
 
+    uint64_t total_size = probe_info.total_size;
     if (total_size > 0) {
         ftruncate(file_fd, total_size);
     }
 
     // Step 3: Determine thread count (fallback to 1 if Range not supported)
     int thread_count = g_requested_threads;
-    if (!supports_range || total_size < (uint64_t)(thread_count * 1024 * 1024)) {
+    if (!probe_info.supports_range || total_size < (uint64_t)(thread_count * 1024 * 1024)) {
         thread_count = 1;
     }
     if (thread_count > MAX_THREADS) thread_count = MAX_THREADS;
@@ -478,24 +451,22 @@ static void *master_download_thread(void *arg) {
     uint64_t last_downloaded_bytes = 0;
 
     if (thread_count > 1 && total_size > 0) {
-        // Multi-threaded parallel download
+        // Multi-threaded parallel download via libcurl
         pthread_t threads[MAX_THREADS];
         worker_args_t args[MAX_THREADS];
         uint64_t segment_size = total_size / thread_count;
 
         for (int i = 0; i < thread_count; i++) {
             args[i].thread_id = i;
-            args[i].tmpl_id = g_tmpl_id;
             args[i].file_fd = file_fd;
             strncpy(args[i].url, target_url, sizeof(args[i].url) - 1);
             args[i].url[sizeof(args[i].url) - 1] = '\0';
             args[i].start_byte = i * segment_size;
             args[i].end_byte = (i == thread_count - 1) ? (total_size - 1) : ((i + 1) * segment_size - 1);
+            args[i].current_offset = args[i].start_byte;
             args[i].bytes_downloaded = 0;
             args[i].finished = 0;
             args[i].error = 0;
-            args[i].conn_id = -1;
-            args[i].req_id = -1;
 
             pthread_create(&threads[i], NULL, parallel_chunk_worker, &args[i]);
         }
@@ -537,7 +508,7 @@ static void *master_download_thread(void *arg) {
             if (any_error) {
                 pthread_mutex_lock(&g_mutex);
                 g_status.state = STATUS_ERROR;
-                snprintf(g_status.error_message, sizeof(g_status.error_message), "Worker connection dropped or chunk error");
+                snprintf(g_status.error_message, sizeof(g_status.error_message), "Worker connection error or chunk write failure");
                 pthread_mutex_unlock(&g_mutex);
                 break;
             }
@@ -546,53 +517,37 @@ static void *master_download_thread(void *arg) {
         }
 
         for (int i = 0; i < thread_count; i++) {
-            if (g_abort_flag && args[i].req_id >= 0) {
-                sceHttpAbortRequest(args[i].req_id);
-            }
             pthread_join(threads[i], NULL);
         }
     } else {
-        // Single-stream download (handles servers without Range support like VikingFile)
-        int s_conn = sceHttpCreateConnectionWithURL(g_tmpl_id, target_url, 0);
-        if (s_conn >= 0) {
-            int s_req = sceHttpCreateRequestWithURL(s_conn, 0, target_url, 0);
-            if (s_req >= 0) {
-                if (sceHttpSendRequest(s_req, NULL, 0) == 0) {
-                    char *buf = malloc(CHUNK_BUFFER_SIZE);
-                    if (buf) {
-                        while (!g_abort_flag) {
-                            int n = sceHttpReadData(s_req, buf, CHUNK_BUFFER_SIZE);
-                            if (n <= 0) break;
+        // Single-stream download via libcurl (handles servers without Range support like VikingFile)
+        CURL *single_curl = curl_easy_init();
+        if (single_curl) {
+            curl_easy_setopt(single_curl, CURLOPT_URL, target_url);
+            curl_easy_setopt(single_curl, CURLOPT_WRITEFUNCTION, single_stream_write_callback);
+            curl_easy_setopt(single_curl, CURLOPT_WRITEDATA, &file_fd);
+            curl_easy_setopt(single_curl, CURLOPT_FOLLOWLOCATION, 1L);
+            curl_easy_setopt(single_curl, CURLOPT_MAXREDIRS, 10L);
+            curl_easy_setopt(single_curl, CURLOPT_SSL_VERIFYPEER, 0L);
+            curl_easy_setopt(single_curl, CURLOPT_SSL_VERIFYHOST, 0L);
+            curl_easy_setopt(single_curl, CURLOPT_USERAGENT, "Mozilla/5.0 (PlayStation 5; PS5-Net-Downloader-Turbo/1.4)");
+            curl_easy_setopt(single_curl, CURLOPT_BUFFERSIZE, CHUNK_BUFFER_SIZE);
+            curl_easy_setopt(single_curl, CURLOPT_TCP_NODELAY, 1L);
+            curl_easy_setopt(single_curl, CURLOPT_CONNECTTIMEOUT, 15L);
+            curl_easy_setopt(single_curl, CURLOPT_LOW_SPEED_LIMIT, 1024L);
+            curl_easy_setopt(single_curl, CURLOPT_LOW_SPEED_TIME, 30L);
+            curl_easy_setopt(single_curl, CURLOPT_NOPROGRESS, 0L);
+            curl_easy_setopt(single_curl, CURLOPT_XFERINFOFUNCTION, curl_xferinfo_callback);
 
-                            write(file_fd, buf, n);
-
-                            pthread_mutex_lock(&g_mutex);
-                            g_status.downloaded_bytes += n;
-                            double now = get_time_seconds();
-                            double elapsed = now - last_speed_time;
-                            if (elapsed >= 0.5) {
-                                uint64_t diff = g_status.downloaded_bytes - last_downloaded_bytes;
-                                double speed = (double)diff / elapsed;
-                                g_status.speed_bytes_sec = speed;
-                                last_speed_time = now;
-                                last_downloaded_bytes = g_status.downloaded_bytes;
-                                if (speed > 1024.0 && total_size > g_status.downloaded_bytes) {
-                                    g_status.eta_seconds = (uint64_t)((total_size - g_status.downloaded_bytes) / speed);
-                                }
-                            }
-                            pthread_mutex_unlock(&g_mutex);
-                        }
-                        free(buf);
-                    }
-                } else {
-                    pthread_mutex_lock(&g_mutex);
-                    g_status.state = STATUS_ERROR;
-                    snprintf(g_status.error_message, sizeof(g_status.error_message), "Single stream connection failed");
-                    pthread_mutex_unlock(&g_mutex);
-                }
-                sceHttpDeleteRequest(s_req);
+            CURLcode res = curl_easy_perform(single_curl);
+            if (res != CURLE_OK && res != CURLE_ABORTED_BY_CALLBACK) {
+                pthread_mutex_lock(&g_mutex);
+                g_status.state = STATUS_ERROR;
+                snprintf(g_status.error_message, sizeof(g_status.error_message), "Download failed: %s", curl_easy_strerror(res));
+                pthread_mutex_unlock(&g_mutex);
             }
-            sceHttpDeleteConnection(s_conn);
+
+            curl_easy_cleanup(single_curl);
         }
     }
 
@@ -627,6 +582,8 @@ void downloader_init(void) {
     g_is_running = 0;
     g_requested_threads = 4;
     pthread_mutex_unlock(&g_mutex);
+
+    curl_global_init(CURL_GLOBAL_ALL);
 }
 
 int downloader_start(const char *url, const char *save_dir, const char *filename, int threads) {
