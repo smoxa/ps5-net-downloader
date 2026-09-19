@@ -17,69 +17,74 @@ static volatile int g_server_running = 1;
 static const char INDEX_HTML[] = 
 "<!DOCTYPE html><html lang=\"ru\"><head><meta charset=\"UTF-8\">"
 "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1.0\">"
-"<title>PS5 Net Downloader</title><style>"
+"<title>PS5 Net Downloader Turbo</title><style>"
 ":root{--bg-base:#0a0e17;--bg-card:#131b2e;--bg-input:#1b2640;--accent:#0070d1;--accent-hover:#0084f7;--accent-glow:rgba(0,112,209,0.4);--text-main:#f0f4fc;--text-muted:#8c9bb5;--border:#233354;--success:#00d26a;--error:#f8312f;}"
 "*{box-sizing:border-box;margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,\"Segoe UI\",Roboto,sans-serif;}"
 "body{background:var(--bg-base);color:var(--text-main);min-height:100vh;display:flex;flex-direction:column;align-items:center;padding:24px 16px;}"
-".container{width:100%;max-width:680px;margin-top:20px;}"
+".container{width:100%;max-width:680px;margin-top:10px;}"
 "header{display:flex;align-items:center;justify-content:space-between;margin-bottom:24px;padding-bottom:16px;border-bottom:1px solid var(--border);}"
 ".brand{display:flex;align-items:center;gap:12px;}"
-".ps-logo{width:36px;height:36px;background:var(--accent);border-radius:8px;display:flex;align-items:center;justify-content:center;font-weight:900;font-size:18px;box-shadow:0 0 15px var(--accent-glow);}"
-"h1{font-size:22px;font-weight:700;}"
-".status-badge{font-size:12px;padding:4px 12px;border-radius:12px;font-weight:600;text-transform:uppercase;background:var(--border);color:var(--text-muted);}"
+".ps-logo{width:40px;height:40px;background:linear-gradient(135deg,var(--accent),#00b4d8);border-radius:10px;display:flex;align-items:center;justify-content:center;font-weight:900;font-size:20px;box-shadow:0 0 20px var(--accent-glow);}"
+"h1{font-size:22px;font-weight:700;}.subtitle{font-size:11px;color:#00b4d8;font-weight:700;text-transform:uppercase;letter-spacing:1.5px;}"
+".status-badge{font-size:12px;padding:5px 14px;border-radius:20px;font-weight:600;text-transform:uppercase;letter-spacing:0.8px;background:var(--border);color:var(--text-muted);}"
 ".status-badge.idle{background:rgba(140,155,181,0.15);color:var(--text-muted);}"
 ".status-badge.downloading{background:rgba(0,112,209,0.2);color:#4da3ff;border:1px solid var(--accent);}"
 ".status-badge.completed{background:rgba(0,210,106,0.15);color:var(--success);}"
 ".status-badge.error{background:rgba(248,49,47,0.15);color:var(--error);}"
 ".card{background:var(--bg-card);border:1px solid var(--border);border-radius:14px;padding:24px;margin-bottom:20px;box-shadow:0 10px 30px rgba(0,0,0,0.3);}"
-".card-title{font-size:16px;font-weight:600;margin-bottom:18px;color:var(--text-main);}"
+".card-title{font-size:16px;font-weight:600;margin-bottom:18px;color:var(--text-main);display:flex;align-items:center;justify-content:space-between;}"
+".thread-badge{font-size:11px;background:rgba(0,180,216,0.2);color:#00d2ff;padding:3px 8px;border-radius:6px;border:1px solid rgba(0,180,216,0.4);font-weight:600;}"
 ".form-group{margin-bottom:16px;}label{display:block;font-size:13px;font-weight:500;color:var(--text-muted);margin-bottom:6px;}"
-"input[type=\"text\"],input[type=\"url\"]{width:100%;background:var(--bg-input);border:1px solid var(--border);border-radius:8px;padding:12px 14px;color:var(--text-main);font-size:14px;outline:none;}"
-"input[type=\"text\"]:focus,input[type=\"url\"]:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-glow);}"
-".btn{display:inline-flex;align-items:center;justify-content:center;padding:12px 20px;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;border:none;transition:all 0.2s;}"
-".btn-primary{background:var(--accent);color:#fff;width:100%;margin-top:8px;box-shadow:0 4px 15px var(--accent-glow);}"
-".btn-primary:hover:not(:disabled){background:var(--accent-hover);}"
+"input[type=\"text\"],input[type=\"url\"],select{width:100%;background:var(--bg-input);border:1px solid var(--border);border-radius:8px;padding:12px 14px;color:var(--text-main);font-size:14px;outline:none;}"
+"input[type=\"text\"]:focus,input[type=\"url\"]:focus,select:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-glow);}"
+".btn{display:inline-flex;align-items:center;justify-content:center;padding:14px 20px;border-radius:8px;font-size:14px;font-weight:700;cursor:pointer;border:none;transition:all 0.2s;}"
+".btn-primary{background:linear-gradient(135deg,var(--accent),#0084f7);color:#fff;width:100%;margin-top:8px;box-shadow:0 4px 18px var(--accent-glow);}"
+".btn-primary:hover:not(:disabled){filter:brightness(1.1);transform:translateY(-1px);}"
 ".btn-primary:disabled{opacity:0.5;cursor:not-allowed;}"
 ".btn-danger{background:rgba(248,49,47,0.15);color:var(--error);border:1px solid rgba(248,49,47,0.4);margin-top:14px;width:100%;}"
 ".progress-box{display:none;margin-top:10px;}.progress-box.active{display:block;}"
 ".file-info{display:flex;justify-content:space-between;font-size:13px;margin-bottom:8px;word-break:break-all;}"
-".progress-bar-container{width:100%;height:12px;background:var(--bg-input);border-radius:6px;overflow:hidden;position:relative;}"
-".progress-bar{height:100%;width:0%;background:linear-gradient(90deg,var(--accent),#00b4d8);border-radius:6px;transition:width 0.3s ease;}"
-".stats-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:16px;text-align:center;}"
-".stat-item{background:var(--bg-input);padding:10px;border-radius:8px;border:1px solid var(--border);}"
-".stat-label{font-size:11px;color:var(--text-muted);text-transform:uppercase;margin-bottom:4px;}"
-".stat-value{font-size:14px;font-weight:700;color:var(--text-main);}"
+".progress-bar-container{width:100%;height:14px;background:var(--bg-input);border-radius:7px;overflow:hidden;position:relative;}"
+".progress-bar{height:100%;width:0%;background:linear-gradient(90deg,var(--accent),#00d2ff);border-radius:7px;transition:width 0.3s ease;box-shadow:0 0 10px rgba(0,180,216,0.5);}"
+".stats-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-top:16px;text-align:center;}"
+".stat-item{background:var(--bg-input);padding:10px 6px;border-radius:8px;border:1px solid var(--border);}"
+".stat-label{font-size:10px;color:var(--text-muted);text-transform:uppercase;margin-bottom:4px;}"
+".stat-value{font-size:13px;font-weight:700;color:var(--text-main);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}"
 ".help-box{font-size:12px;color:var(--text-muted);line-height:1.6;}"
-".help-box code{background:var(--bg-input);padding:2px 6px;border-radius:4px;color:#4da3ff;}"
 "</style></head><body><div class=\"container\">"
-"<header><div class=\"brand\"><div class=\"ps-logo\">PS</div><div><h1>Net Downloader</h1></div></div><div id=\"statusBadge\" class=\"status-badge idle\">Ожидание</div></header>"
+"<header><div class=\"brand\"><div class=\"ps-logo\">PS</div><div><h1>Net Downloader</h1><div class=\"subtitle\">Turbo Multi-Threaded Edition</div></div></div><div id=\"statusBadge\" class=\"status-badge idle\">Ожидание</div></header>"
 "<div class=\"card\"><div class=\"card-title\">Новая загрузка</div>"
-"<div class=\"form-group\"><label>Прямая ссылка на файл (HTTP / HTTPS):</label><input type=\"url\" id=\"fileUrl\" placeholder=\"http://192.168.1.100:8000/game.pkg\" required></div>"
-"<div class=\"form-group\"><label>Директория сохранения на PS5:</label><input type=\"text\" id=\"savePath\" value=\"/data/pkg/\" placeholder=\"/data/pkg/\"></div>"
+"<div class=\"form-group\"><label>Прямая ссылка на файл (HTTP / HTTPS):</label><input type=\"url\" id=\"fileUrl\" placeholder=\"https://tunnel1.dlproxy.uk/.../game.pkg\" required></div>"
+"<div style=\"display:grid;grid-template-columns:2fr 1fr;gap:12px;\"><div class=\"form-group\"><label>Директория на PS5:</label><input type=\"text\" id=\"savePath\" value=\"/data/pkg/\" placeholder=\"/data/pkg/\"></div>"
+"<div class=\"form-group\"><label>Потоки (Turbo):</label><select id=\"threadsSelect\"><option value=\"4\" selected>4 потока (Turbo)</option><option value=\"8\">8 потоков (Max)</option><option value=\"1\">1 поток (Обычный)</option></select></div></div>"
 "<div class=\"form-group\"><label>Имя файла (опционально):</label><input type=\"text\" id=\"customFilename\" placeholder=\"Автоопределение из ссылки\"></div>"
-"<button id=\"startBtn\" class=\"btn btn-primary\" onclick=\"startDownload()\">Начать загрузку на PS5</button></div>"
-"<div id=\"progressCard\" class=\"card progress-box\"><div class=\"card-title\">Текущая загрузка</div>"
-"<div class=\"file-info\"><span id=\"currentFileName\" style=\"font-weight:600;\">game.pkg</span><span id=\"percentText\">0%</span></div>"
+"<button id=\"startBtn\" class=\"btn btn-primary\" onclick=\"startDownload()\">⚡ Начать Turbo-загрузку на PS5</button></div>"
+"<div id=\"progressCard\" class=\"card progress-box\"><div class=\"card-title\"><span>Текущая загрузка</span><span id=\"activeThreadsBadge\" class=\"thread-badge\">4 потока (Turbo)</span></div>"
+"<div class=\"file-info\"><span id=\"currentFileName\" style=\"font-weight:600;\">game.pkg</span><span id=\"percentText\" style=\"font-weight:700;color:#00d2ff;\">0%</span></div>"
 "<div class=\"progress-bar-container\"><div id=\"progressBar\" class=\"progress-bar\"></div></div>"
 "<div class=\"stats-grid\"><div class=\"stat-item\"><div class=\"stat-label\">Размер</div><div id=\"sizeStat\" class=\"stat-value\">0 / 0 MB</div></div>"
-"<div class=\"stat-item\"><div class=\"stat-label\">Скорость</div><div id=\"speedStat\" class=\"stat-value\">0 MB/s</div></div>"
+"<div class=\"stat-item\"><div class=\"stat-label\">Скорость</div><div id=\"speedStat\" class=\"stat-value\" style=\"color:#00d2ff;\">0 MB/s</div></div>"
+"<div class=\"stat-item\"><div class=\"stat-label\">Осталось</div><div id=\"etaStat\" class=\"stat-value\">--</div></div>"
 "<div class=\"stat-item\"><div class=\"stat-label\">Статус</div><div id=\"stateStat\" class=\"stat-value\">Подключение...</div></div></div>"
 "<button id=\"abortBtn\" class=\"btn btn-danger\" onclick=\"abortDownload()\">Прервать загрузку</button></div>"
-"<div class=\"card help-box\"><div class=\"card-title\" style=\"font-size:14px;margin-bottom:8px;\">Подсказки</div>"
-"<p>• Файлы сохраняются во внутренний накопитель PS5 (по умолчанию <code>/data/pkg/</code>).</p>"
-"<p>• Для максимальной скорости раздавайте файлы по локальной сети через HTTP.</p></div></div>"
+"<div class=\"card help-box\"><p>• <b>Многопоточность</b>: файл скачивается параллельными кусками через Range-запросы с буфером сокетов 4MB.</p><p>• <b>Автономность</b>: загрузка идёт на самой консоли. ПК можно выключить сразу после нажатия кнопки «Начать».</p></div></div>"
 "<script>"
+"let lastState='';"
 "function formatBytes(b){if(!b||b<=0)return'0 B';const k=1024,s=['B','KB','MB','GB','TB'],i=Math.floor(Math.log(b)/Math.log(k));return parseFloat((b/Math.pow(k,i)).toFixed(2))+' '+s[i];}"
+"function formatEta(s){if(!s||s<=0)return'--';if(s<60)return s+' сек';const m=Math.floor(s/60);if(m<60)return m+' мин '+(s%60)+' с';return Math.floor(m/60)+' ч '+(m%60)+' мин';}"
 "async function fetchStatus(){try{const r=await fetch('/api/status');if(!r.ok)return;const d=await r.json();updateUI(d);}catch(e){}}"
-"function updateUI(d){const badge=document.getElementById('statusBadge'),card=document.getElementById('progressCard'),btn=document.getElementById('startBtn'),bar=document.getElementById('progressBar'),pText=document.getElementById('percentText'),fName=document.getElementById('currentFileName'),sStat=document.getElementById('sizeStat'),spStat=document.getElementById('speedStat'),stStat=document.getElementById('stateStat');"
+"function updateUI(d){const badge=document.getElementById('statusBadge'),card=document.getElementById('progressCard'),btn=document.getElementById('startBtn'),bar=document.getElementById('progressBar'),pText=document.getElementById('percentText'),fName=document.getElementById('currentFileName'),sStat=document.getElementById('sizeStat'),spStat=document.getElementById('speedStat'),etaStat=document.getElementById('etaStat'),stStat=document.getElementById('stateStat'),tBadge=document.getElementById('activeThreadsBadge');"
 "if(d.status==='downloading'){badge.className='status-badge downloading';badge.textContent='Скачивание';card.classList.add('active');btn.disabled=true;"
 "const p=d.total_bytes>0?Math.min(100,(d.downloaded_bytes/d.total_bytes*100)).toFixed(1):0;bar.style.width=p+'%';pText.textContent=p+'%';fName.textContent=d.filename||'Загрузка...';"
-"sStat.textContent=formatBytes(d.downloaded_bytes)+' / '+formatBytes(d.total_bytes);spStat.textContent=(d.speed_bytes_sec/(1024*1024)).toFixed(2)+' MB/s';stStat.textContent='В процессе';}"
-"else if(d.status==='completed'){badge.className='status-badge completed';badge.textContent='Завершено';bar.style.width='100%';pText.textContent='100%';stStat.textContent='Готово!';btn.disabled=false;}"
+"sStat.textContent=formatBytes(d.downloaded_bytes)+' / '+formatBytes(d.total_bytes);spStat.textContent=(d.speed_bytes_sec/(1024*1024)).toFixed(2)+' MB/s';etaStat.textContent=formatEta(d.eta_seconds);stStat.textContent='В процессе';"
+"const t=d.num_threads||1;tBadge.textContent=t>1?t+' потока (Turbo)':'1 поток';}"
+"else if(d.status==='completed'){badge.className='status-badge completed';badge.textContent='Завершено';bar.style.width='100%';pText.textContent='100%';stStat.textContent='Готово!';etaStat.textContent='0 сек';btn.disabled=false;}"
 "else if(d.status==='error'){badge.className='status-badge error';badge.textContent='Ошибка';stStat.textContent=d.error_message||'Сбой';btn.disabled=false;}"
-"else{badge.className='status-badge idle';badge.textContent='Ожидание';card.classList.remove('active');btn.disabled=false;}}"
+"else{badge.className='status-badge idle';badge.textContent='Ожидание';card.classList.remove('active');btn.disabled=false;}"
+"lastState=d.status;}"
 "async function startDownload(){const u=document.getElementById('fileUrl').value.trim();if(!u){alert('Введите ссылку');return;}"
-"const payload={url:u,save_dir:document.getElementById('savePath').value.trim()||'/data/pkg/',filename:document.getElementById('customFilename').value.trim()};"
+"const t=parseInt(document.getElementById('threadsSelect').value,10)||4;"
+"const payload={url:u,save_dir:document.getElementById('savePath').value.trim()||'/data/pkg/',filename:document.getElementById('customFilename').value.trim(),threads:t};"
 "const r=await fetch('/api/download',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});"
 "if(!r.ok){const e=await r.json();alert('Ошибка: '+(e.error||r.statusText));return;}document.getElementById('progressCard').classList.add('active');document.getElementById('startBtn').disabled=true;fetchStatus();}"
 "async function abortDownload(){if(!confirm('Прервать загрузку?'))return;await fetch('/api/abort',{method:'POST'});fetchStatus();}"
@@ -104,7 +109,7 @@ static void extract_json_string(const char *json, const char *key, char *out, si
         out[0] = '\0';
         return;
     }
-    pos++; // start of string value
+    pos++;
     char *end = strchr(pos, '\"');
     if (!end) {
         out[0] = '\0';
@@ -114,6 +119,18 @@ static void extract_json_string(const char *json, const char *key, char *out, si
     if (len >= max_len) len = max_len - 1;
     strncpy(out, pos, len);
     out[len] = '\0';
+}
+
+static int extract_json_int(const char *json, const char *key, int default_val) {
+    char search_pattern[128];
+    snprintf(search_pattern, sizeof(search_pattern), "\"%s\"", key);
+    char *pos = strstr(json, search_pattern);
+    if (!pos) return default_val;
+    pos = strchr(pos + strlen(search_pattern), ':');
+    if (!pos) return default_val;
+    pos++;
+    while (*pos == ' ' || *pos == '\t') pos++;
+    return atoi(pos);
 }
 
 static void send_response(int client_fd, int status_code, const char *content_type, const char *body) {
@@ -152,7 +169,7 @@ static void handle_client(int client_fd) {
     char path[256];
     sscanf(buffer, "%15s %255s", method, path);
 
-    // Handle CORS preflight
+    // CORS preflight
     if (strcmp(method, "OPTIONS") == 0) {
         send_response(client_fd, 200, "text/plain", "");
         close(client_fd);
@@ -177,12 +194,14 @@ static void handle_client(int client_fd) {
 
             char json_resp[1024];
             snprintf(json_resp, sizeof(json_resp),
-                "{\"status\":\"%s\",\"filename\":\"%s\",\"downloaded_bytes\":%llu,\"total_bytes\":%llu,\"speed_bytes_sec\":%.2f,\"error_message\":\"%s\"}",
+                "{\"status\":\"%s\",\"filename\":\"%s\",\"downloaded_bytes\":%llu,\"total_bytes\":%llu,\"speed_bytes_sec\":%.2f,\"eta_seconds\":%llu,\"num_threads\":%d,\"error_message\":\"%s\"}",
                 state_str,
                 status.filename,
                 (unsigned long long)status.downloaded_bytes,
                 (unsigned long long)status.total_bytes,
                 status.speed_bytes_sec,
+                (unsigned long long)status.eta_seconds,
+                status.num_threads,
                 status.error_message);
 
             send_response(client_fd, 200, "application/json", json_resp);
@@ -202,11 +221,12 @@ static void handle_client(int client_fd) {
             extract_json_string(body, "url", url, sizeof(url));
             extract_json_string(body, "save_dir", save_dir, sizeof(save_dir));
             extract_json_string(body, "filename", filename, sizeof(filename));
+            int threads = extract_json_int(body, "threads", 4);
 
             if (strlen(url) == 0) {
                 send_response(client_fd, 400, "application/json", "{\"error\":\"URL is required\"}");
             } else {
-                int res = downloader_start(url, save_dir, filename);
+                int res = downloader_start(url, save_dir, filename, threads);
                 if (res == 0) {
                     send_response(client_fd, 200, "application/json", "{\"ok\":true}");
                 } else {
@@ -254,7 +274,7 @@ int server_start(int port) {
         return -1;
     }
 
-    printf("[PS5-ND] Web server listening on http://0.0.0.0:%d\n", port);
+    printf("[PS5-ND] Turbo Web server listening on http://0.0.0.0:%d\n", port);
 
     while (g_server_running) {
         struct sockaddr_in client_addr;

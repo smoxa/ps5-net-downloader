@@ -29,7 +29,7 @@ int main(int argc, char *argv[]) {
     signal(SIGTERM, handle_signal);
 
     printf("========================================\n");
-    printf("   PS5 Net Downloader Daemon v1.0.0     \n");
+    printf("  PS5 Net Downloader Turbo Edition v1.1 \n");
     printf("========================================\n");
 
     downloader_init();

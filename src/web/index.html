@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>PS5 Net Downloader</title>
+    <title>PS5 Net Downloader Turbo</title>
     <style>
         :root {
             --bg-base: #0a0e17;
@@ -40,7 +40,7 @@
         .container {
             width: 100%;
             max-width: 680px;
-            margin-top: 20px;
+            margin-top: 10px;
         }
 
         header {
@@ -59,16 +59,16 @@
         }
 
         .ps-logo {
-            width: 36px;
-            height: 36px;
-            background: var(--accent);
-            border-radius: 8px;
+            width: 40px;
+            height: 40px;
+            background: linear-gradient(135deg, var(--accent), #00b4d8);
+            border-radius: 10px;
             display: flex;
             align-items: center;
             justify-content: center;
             font-weight: 900;
-            font-size: 18px;
-            box-shadow: 0 0 15px var(--accent-glow);
+            font-size: 20px;
+            box-shadow: 0 0 20px var(--accent-glow);
         }
 
         h1 {
@@ -77,10 +77,18 @@
             letter-spacing: 0.5px;
         }
 
+        .subtitle {
+            font-size: 11px;
+            color: #00b4d8;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 1.5px;
+        }
+
         .status-badge {
             font-size: 12px;
-            padding: 4px 12px;
-            border-radius: 12px;
+            padding: 5px 14px;
+            border-radius: 20px;
             font-weight: 600;
             text-transform: uppercase;
             letter-spacing: 0.8px;
@@ -109,7 +117,17 @@
             color: var(--text-main);
             display: flex;
             align-items: center;
-            gap: 8px;
+            justify-content: space-between;
+        }
+
+        .thread-badge {
+            font-size: 11px;
+            background: rgba(0, 180, 216, 0.2);
+            color: #00d2ff;
+            padding: 3px 8px;
+            border-radius: 6px;
+            border: 1px solid rgba(0, 180, 216, 0.4);
+            font-weight: 600;
         }
 
         .form-group {
@@ -124,7 +142,7 @@
             margin-bottom: 6px;
         }
 
-        input[type="text"], input[type="url"] {
+        input[type="text"], input[type="url"], select {
             width: 100%;
             background: var(--bg-input);
             border: 1px solid var(--border);
@@ -136,7 +154,11 @@
             transition: border-color 0.2s, box-shadow 0.2s;
         }
 
-        input[type="text"]:focus, input[type="url"]:focus {
+        select {
+            cursor: pointer;
+        }
+
+        input[type="text"]:focus, input[type="url"]:focus, select:focus {
             border-color: var(--accent);
             box-shadow: 0 0 0 3px var(--accent-glow);
         }
@@ -145,10 +167,10 @@
             display: inline-flex;
             align-items: center;
             justify-content: center;
-            padding: 12px 20px;
+            padding: 14px 20px;
             border-radius: 8px;
             font-size: 14px;
-            font-weight: 600;
+            font-weight: 700;
             cursor: pointer;
             border: none;
             transition: all 0.2s;
@@ -156,16 +178,16 @@
         }
 
         .btn-primary {
-            background: var(--accent);
+            background: linear-gradient(135deg, var(--accent), #0084f7);
             color: #fff;
             width: 100%;
             margin-top: 8px;
-            box-shadow: 0 4px 15px var(--accent-glow);
+            box-shadow: 0 4px 18px var(--accent-glow);
         }
 
         .btn-primary:hover:not(:disabled) {
-            background: var(--accent-hover);
             transform: translateY(-1px);
+            filter: brightness(1.1);
         }
 
         .btn-primary:disabled {
@@ -179,6 +201,7 @@
             color: var(--error);
             border: 1px solid rgba(248, 49, 47, 0.4);
             margin-top: 14px;
+            width: 100%;
         }
 
         .btn-danger:hover {
@@ -186,7 +209,6 @@
             color: #fff;
         }
 
-        /* Progress section */
         .progress-box {
             display: none;
             margin-top: 10px;
@@ -206,9 +228,9 @@
 
         .progress-bar-container {
             width: 100%;
-            height: 12px;
+            height: 14px;
             background: var(--bg-input);
-            border-radius: 6px;
+            border-radius: 7px;
             overflow: hidden;
             position: relative;
         }
@@ -216,37 +238,42 @@
         .progress-bar {
             height: 100%;
             width: 0%;
-            background: linear-gradient(90deg, var(--accent), #00b4d8);
-            border-radius: 6px;
+            background: linear-gradient(90deg, var(--accent), #00d2ff);
+            border-radius: 7px;
             transition: width 0.3s ease;
+            box-shadow: 0 0 10px rgba(0, 180, 216, 0.5);
         }
 
         .stats-grid {
             display: grid;
-            grid-template-columns: repeat(3, 1fr);
-            gap: 12px;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 10px;
             margin-top: 16px;
             text-align: center;
         }
 
         .stat-item {
             background: var(--bg-input);
-            padding: 10px;
+            padding: 10px 6px;
             border-radius: 8px;
             border: 1px solid var(--border);
         }
 
         .stat-label {
-            font-size: 11px;
+            font-size: 10px;
             color: var(--text-muted);
             text-transform: uppercase;
             margin-bottom: 4px;
+            letter-spacing: 0.5px;
         }
 
         .stat-value {
-            font-size: 14px;
+            font-size: 13px;
             font-weight: 700;
             color: var(--text-main);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
         }
 
         .help-box {
@@ -270,39 +297,53 @@
                 <div class="ps-logo">PS</div>
                 <div>
                     <h1>Net Downloader</h1>
+                    <div class="subtitle">Turbo Multi-Threaded Edition</div>
                 </div>
             </div>
             <div id="statusBadge" class="status-badge idle">Ожидание</div>
         </header>
 
-        <!-- Форма добавления задачи -->
+        <!-- Новая загрузка -->
         <div class="card">
             <div class="card-title">
                 <span>Новая загрузка</span>
             </div>
             <div class="form-group">
                 <label for="fileUrl">Прямая ссылка на файл (HTTP / HTTPS):</label>
-                <input type="url" id="fileUrl" placeholder="http://192.168.1.100:8000/game.pkg" required>
+                <input type="url" id="fileUrl" placeholder="https://tunnel1.dlproxy.uk/.../game.pkg" required>
+            </div>
+            <div style="display: grid; grid-template-columns: 2fr 1fr; gap: 12px;">
+                <div class="form-group">
+                    <label for="savePath">Директория на PS5:</label>
+                    <input type="text" id="savePath" value="/data/pkg/" placeholder="/data/pkg/">
+                </div>
+                <div class="form-group">
+                    <label for="threadsSelect">Потоки (Turbo):</label>
+                    <select id="threadsSelect">
+                        <option value="4" selected>4 потока (Оптимально)</option>
+                        <option value="8">8 потоков (Turbo Max)</option>
+                        <option value="1">1 поток (Стандартный)</option>
+                    </select>
+                </div>
             </div>
             <div class="form-group">
-                <label for="savePath">Директория сохранения на PS5:</label>
-                <input type="text" id="savePath" value="/data/pkg/" placeholder="/data/pkg/">
-            </div>
-            <div class="form-group">
-                <label for="customFilename">Пользовательское имя файла (опционально):</label>
+                <label for="customFilename">Имя файла (опционально):</label>
                 <input type="text" id="customFilename" placeholder="Оставьте пустым для автоопределения из ссылки">
             </div>
             <button id="startBtn" class="btn btn-primary" onclick="startDownload()">
-                Начать загрузку на PS5
+                ⚡ Начать Turbo-загрузку на PS5
             </button>
         </div>
 
-        <!-- Прогресс текущей загрузки -->
+        <!-- Прогресс -->
         <div id="progressCard" class="card progress-box">
-            <div class="card-title">Текущая загрузка</div>
+            <div class="card-title">
+                <span>Текущая загрузка</span>
+                <span id="activeThreadsBadge" class="thread-badge">4 потока (Turbo)</span>
+            </div>
             <div class="file-info">
                 <span id="currentFileName" style="font-weight: 600;">game.pkg</span>
-                <span id="percentText">0%</span>
+                <span id="percentText" style="font-weight: 700; color: #00d2ff;">0%</span>
             </div>
             <div class="progress-bar-container">
                 <div id="progressBar" class="progress-bar"></div>
@@ -315,7 +356,11 @@
                 </div>
                 <div class="stat-item">
                     <div class="stat-label">Скорость</div>
-                    <div id="speedStat" class="stat-value">0 MB/s</div>
+                    <div id="speedStat" class="stat-value" style="color: #00d2ff;">0 MB/s</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-label">Осталось</div>
+                    <div id="etaStat" class="stat-value">--</div>
                 </div>
                 <div class="stat-item">
                     <div class="stat-label">Статус</div>
@@ -330,15 +375,15 @@
 
         <!-- Справка -->
         <div class="card help-box">
-            <div class="card-title" style="font-size: 14px; margin-bottom: 8px;">Информация и подсказки</div>
-            <p>• Файлы сохраняются во внутренний накопитель PS5 (по умолчанию <code>/data/pkg/</code>).</p>
-            <p>• Для максимальной скорости рекомендуется раздавать файлы с ПК по локальной сети через HTTP (например, <code>python -m http.server 8000</code> или HFS).</p>
-            <p>• Сервер слушает порт <code>8080</code> в фоновом потоке консоли.</p>
+            <div class="card-title" style="font-size: 14px; margin-bottom: 8px;">О Turbo-режиме</div>
+            <p>• <b>Многопоточность</b>: файл скачивается параллельными кусками через Range-запросы с буфером сокетов 4MB.</p>
+            <p>• <b>Автономность</b>: загрузка идёт на самой консоли. ПК можно выключить сразу после нажатия кнопки «Начать».</p>
         </div>
     </div>
 
     <script>
         let pollTimer = null;
+        let lastState = '';
 
         function formatBytes(bytes) {
             if (!bytes || bytes <= 0) return '0 B';
@@ -346,6 +391,34 @@
             const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
             const i = Math.floor(Math.log(bytes) / Math.log(k));
             return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+        }
+
+        function formatEta(seconds) {
+            if (!seconds || seconds <= 0) return '--';
+            if (seconds < 60) return `${seconds} сек`;
+            const minutes = Math.floor(seconds / 60);
+            const remainingSec = seconds % 60;
+            if (minutes < 60) return `${minutes} мин ${remainingSec} с`;
+            const hours = Math.floor(minutes / 60);
+            const remainingMin = minutes % 60;
+            return `${hours} ч ${remainingMin} мин`;
+        }
+
+        function playAlertSound() {
+            try {
+                const ctx = new (window.AudioContext || window.webkitAudioContext)();
+                const osc = ctx.createOscillator();
+                const gain = ctx.createGain();
+                osc.type = 'sine';
+                osc.frequency.setValueAtTime(587.33, ctx.currentTime);
+                osc.frequency.setValueAtTime(880, ctx.currentTime + 0.15);
+                gain.gain.setValueAtTime(0.2, ctx.currentTime);
+                gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.4);
+                osc.connect(gain);
+                gain.connect(ctx.destination);
+                osc.start();
+                osc.stop(ctx.currentTime + 0.4);
+            } catch(e) {}
         }
 
         async function fetchStatus() {
@@ -368,7 +441,9 @@
             const currentFileName = document.getElementById('currentFileName');
             const sizeStat = document.getElementById('sizeStat');
             const speedStat = document.getElementById('speedStat');
+            const etaStat = document.getElementById('etaStat');
             const stateStat = document.getElementById('stateStat');
+            const threadsBadge = document.getElementById('activeThreadsBadge');
 
             if (data.status === 'downloading') {
                 badge.className = 'status-badge downloading';
@@ -386,14 +461,22 @@
 
                 sizeStat.textContent = `${formatBytes(data.downloaded_bytes)} / ${formatBytes(data.total_bytes)}`;
                 speedStat.textContent = `${(data.speed_bytes_sec / (1024 * 1024)).toFixed(2)} MB/s`;
+                etaStat.textContent = formatEta(data.eta_seconds);
                 stateStat.textContent = 'В процессе';
+
+                const threads = data.num_threads || 1;
+                threadsBadge.textContent = threads > 1 ? `${threads} потока (Turbo)` : '1 поток';
             } else if (data.status === 'completed') {
                 badge.className = 'status-badge completed';
                 badge.textContent = 'Завершено';
                 progressBar.style.width = '100%';
                 percentText.textContent = '100%';
                 stateStat.textContent = 'Готово!';
+                etaStat.textContent = '0 сек';
                 startBtn.disabled = false;
+                if (lastState === 'downloading') {
+                    playAlertSound();
+                }
             } else if (data.status === 'error') {
                 badge.className = 'status-badge error';
                 badge.textContent = 'Ошибка';
@@ -405,12 +488,15 @@
                 progressCard.classList.remove('active');
                 startBtn.disabled = false;
             }
+
+            lastState = data.status;
         }
 
         async function startDownload() {
             const urlInput = document.getElementById('fileUrl');
             const savePathInput = document.getElementById('savePath');
             const filenameInput = document.getElementById('customFilename');
+            const threadsSelect = document.getElementById('threadsSelect');
 
             const url = urlInput.value.trim();
             if (!url) {
@@ -421,7 +507,8 @@
             const payload = {
                 url: url,
                 save_dir: savePathInput.value.trim() || '/data/pkg/',
-                filename: filenameInput.value.trim()
+                filename: filenameInput.value.trim(),
+                threads: parseInt(threadsSelect.value, 10) || 4
             };
 
             try {
@@ -455,7 +542,6 @@
             }
         }
 
-        // Запуск регулярного опроса раз в секунду
         pollTimer = setInterval(fetchStatus, 1000);
         fetchStatus();
     </script>
