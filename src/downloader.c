@@ -24,8 +24,12 @@
 static int curl_sockopt_cb(void *clientp, curl_socket_t curlfd, curlsocktype purpose) {
     (void)clientp;
     (void)purpose;
-    int rcvbuf = 4 * 1024 * 1024; // 4 MB TCP receive buffer
-    setsockopt(curlfd, SOL_SOCKET, SO_RCVBUF, (const char *)&rcvbuf, sizeof(rcvbuf));
+    int rcvbufs[] = { 2097152, 1048576, 524288, 262144, 131072 };
+    for (size_t i = 0; i < sizeof(rcvbufs)/sizeof(rcvbufs[0]); i++) {
+        if (setsockopt(curlfd, SOL_SOCKET, SO_RCVBUF, (const char *)&rcvbufs[i], sizeof(rcvbufs[i])) == 0) {
+            break;
+        }
+    }
     int nodelay = 1;
     setsockopt(curlfd, IPPROTO_TCP, TCP_NODELAY, (const char *)&nodelay, sizeof(nodelay));
     return CURL_SOCKOPT_OK;
