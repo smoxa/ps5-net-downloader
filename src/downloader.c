@@ -18,13 +18,14 @@
 
 #define CHUNK_BUFFER_SIZE (1024 * 1024) // 1 MB chunk buffer
 #define MAX_THREADS 8
+#define MAX_REDIRECTS 5
 
 typedef struct {
     int thread_id;
     int file_fd;
     char host[256];
     int port;
-    char path[1024];
+    char path[2048];
     uint64_t start_byte;
     uint64_t end_byte;
     uint64_t bytes_downloaded;
@@ -105,23 +106,77 @@ static int parse_url(const char *url, char *host, int *port, char *path) {
     return 0;
 }
 
+static void sanitize_filename(char *name) {
+    for (char *p = name; *p; p++) {
+        if (*p == '/' || *p == '\\' || *p == ':' || *p == '*' || *p == '?' || *p == '"' || *p == '<' || *p == '>' || *p == '|') {
+            *p = '_';
+        }
+    }
+}
+
 static void extract_filename_from_url(const char *url, char *out_filename, size_t max_len) {
     const char *last_slash = strrchr(url, '/');
     if (last_slash && *(last_slash + 1) != '\0') {
         const char *name = last_slash + 1;
         const char *query = strchr(name, '?');
-        if (query) {
-            size_t len = query - name;
-            if (len >= max_len) len = max_len - 1;
-            strncpy(out_filename, name, len);
-            out_filename[len] = '\0';
-        } else {
-            strncpy(out_filename, name, max_len - 1);
-            out_filename[max_len - 1] = '\0';
-        }
+        size_t len = query ? (size_t)(query - name) : strlen(name);
+        if (len >= max_len) len = max_len - 1;
+        strncpy(out_filename, name, len);
+        out_filename[len] = '\0';
+        sanitize_filename(out_filename);
     } else {
         snprintf(out_filename, max_len, "download_%ld.pkg", (long)time(NULL));
     }
+}
+
+static int extract_filename_from_headers(const char *headers, char *out_filename, size_t max_len) {
+    const char *cd = strcasestr(headers, "Content-Disposition:");
+    if (!cd) return 0;
+
+    // Check for UTF-8 encoded filename*=UTF-8''filename.ext
+    const char *fn_pos = strcasestr(cd, "filename*=");
+    if (fn_pos) {
+        const char *utf = strstr(fn_pos, "UTF-8''");
+        if (utf) {
+            const char *val = utf + 7;
+            size_t i = 0;
+            while (*val && *val != '\r' && *val != '\n' && *val != ';' && i < max_len - 1) {
+                out_filename[i++] = *val++;
+            }
+            out_filename[i] = '\0';
+            sanitize_filename(out_filename);
+            if (i > 0) return 1;
+        }
+    }
+
+    // Check for standard filename="filename.ext" or filename=filename.ext
+    fn_pos = strcasestr(cd, "filename=");
+    if (fn_pos) {
+        const char *val = fn_pos + 9;
+        while (*val == ' ' || *val == '\t') val++;
+        if (*val == '\"') {
+            val++;
+            const char *end_quote = strchr(val, '\"');
+            if (end_quote) {
+                size_t len = end_quote - val;
+                if (len >= max_len) len = max_len - 1;
+                strncpy(out_filename, val, len);
+                out_filename[len] = '\0';
+                sanitize_filename(out_filename);
+                return 1;
+            }
+        } else {
+            size_t i = 0;
+            while (*val && *val != '\r' && *val != '\n' && *val != ';' && *val != ' ' && i < max_len - 1) {
+                out_filename[i++] = *val++;
+            }
+            out_filename[i] = '\0';
+            sanitize_filename(out_filename);
+            if (i > 0) return 1;
+        }
+    }
+
+    return 0;
 }
 
 static void optimize_socket(int sockfd) {
@@ -129,6 +184,13 @@ static void optimize_socket(int sockfd) {
     setsockopt(sockfd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
     int nodelay = 1;
     setsockopt(sockfd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
+
+    // 15-second socket read/write timeouts to prevent hanging on cold tunnels
+    struct timeval tv;
+    tv.tv_sec = 15;
+    tv.tv_usec = 0;
+    setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(sockfd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 }
 
 static int connect_to_host(const char *host, int port) {
@@ -158,18 +220,42 @@ static int connect_to_host(const char *host, int port) {
     return sockfd;
 }
 
-static int read_http_headers(int sockfd, char *header_buf, size_t max_len, int *status_code, uint64_t *content_length, int *supports_range) {
+static int connect_to_host_with_retry(const char *host, int port, int max_retries) {
+    for (int attempt = 1; attempt <= max_retries; attempt++) {
+        int fd = connect_to_host(host, port);
+        if (fd >= 0) {
+            return fd;
+        }
+        if (attempt < max_retries && !g_abort_flag) {
+            usleep(1000000); // Wait 1s between retries
+        }
+    }
+    return -1;
+}
+
+static int read_http_headers(int sockfd, char *header_buf, size_t max_len, int *status_code, uint64_t *content_length, int *supports_range, char *location, size_t loc_max_len) {
     size_t header_bytes = 0;
     *status_code = 0;
     *content_length = 0;
     *supports_range = 0;
+    if (location) location[0] = '\0';
 
     while (header_bytes < max_len - 1) {
-        int r = recv(sockfd, header_buf + header_bytes, 1, 0);
+        // Read in small buffers instead of 1 byte for performance
+        char tmp[256];
+        int r = recv(sockfd, tmp, sizeof(tmp) - 1, 0);
         if (r <= 0) break;
+        tmp[r] = '\0';
+
+        if (header_bytes + r >= max_len - 1) {
+            r = (max_len - 1) - header_bytes;
+        }
+        memcpy(header_buf + header_bytes, tmp, r);
         header_bytes += r;
         header_buf[header_bytes] = '\0';
-        if (strstr(header_buf, "\r\n\r\n")) {
+
+        char *end = strstr(header_buf, "\r\n\r\n");
+        if (end) {
             break;
         }
     }
@@ -194,23 +280,37 @@ static int read_http_headers(int sockfd, char *header_buf, size_t max_len, int *
         *supports_range = 1;
     }
 
+    // Check for Location redirect header
+    if (location) {
+        char *loc_pos = strcasestr(header_buf, "Location:");
+        if (loc_pos) {
+            char *val = loc_pos + 9;
+            while (*val == ' ' || *val == '\t') val++;
+            size_t i = 0;
+            while (*val && *val != '\r' && *val != '\n' && i < loc_max_len - 1) {
+                location[i++] = *val++;
+            }
+            location[i] = '\0';
+        }
+    }
+
     return 0;
 }
 
 static void *parallel_chunk_worker(void *arg) {
     worker_args_t *args = (worker_args_t *)arg;
 
-    int sockfd = connect_to_host(args->host, args->port);
+    int sockfd = connect_to_host_with_retry(args->host, args->port, 3);
     if (sockfd < 0) {
         args->error = 1;
         return NULL;
     }
 
-    char req[2048];
+    char req[4096];
     int req_len = snprintf(req, sizeof(req),
         "GET %s HTTP/1.1\r\n"
         "Host: %s\r\n"
-        "User-Agent: PS5-Net-Downloader-Turbo/1.1\r\n"
+        "User-Agent: PS5-Net-Downloader-Turbo/1.2\r\n"
         "Range: bytes=%llu-%llu\r\n"
         "Connection: close\r\n\r\n",
         args->path, args->host,
@@ -223,7 +323,7 @@ static void *parallel_chunk_worker(void *arg) {
     int status_code = 0;
     uint64_t dummy_cl = 0;
     int dummy_range = 0;
-    read_http_headers(sockfd, header_buf, sizeof(header_buf), &status_code, &dummy_cl, &dummy_range);
+    read_http_headers(sockfd, header_buf, sizeof(header_buf), &status_code, &dummy_cl, &dummy_range, NULL, 0);
 
     if (status_code != 200 && status_code != 206) {
         close(sockfd);
@@ -273,9 +373,11 @@ static void *parallel_chunk_worker(void *arg) {
 
 static void *master_download_thread(void *arg) {
     (void)arg;
+    char current_url[2048];
     char host[256];
     int port = 80;
-    char path[1024];
+    char path[2048];
+    int redirect_count = 0;
 
     pthread_mutex_lock(&g_mutex);
     g_status.state = STATUS_CONNECTING;
@@ -285,52 +387,84 @@ static void *master_download_thread(void *arg) {
     g_status.eta_seconds = 0;
     g_status.error_message[0] = '\0';
     g_status.num_threads = 1;
+    strncpy(current_url, g_status.url, sizeof(current_url) - 1);
+    current_url[sizeof(current_url) - 1] = '\0';
     pthread_mutex_unlock(&g_mutex);
 
-    parse_url(g_status.url, host, &port, path);
-
-    // Initial probe connection
-    int probe_fd = connect_to_host(host, port);
-    if (probe_fd < 0) {
-        pthread_mutex_lock(&g_mutex);
-        g_status.state = STATUS_ERROR;
-        snprintf(g_status.error_message, sizeof(g_status.error_message), "Failed to connect to %s:%d", host, port);
-        g_is_running = 0;
-        pthread_mutex_unlock(&g_mutex);
-        return NULL;
-    }
-
-    // Send probe request with Range
-    char probe_req[2048];
-    int probe_len = snprintf(probe_req, sizeof(probe_req),
-        "GET %s HTTP/1.1\r\n"
-        "Host: %s\r\n"
-        "User-Agent: PS5-Net-Downloader-Turbo/1.1\r\n"
-        "Range: bytes=0-0\r\n"
-        "Connection: close\r\n\r\n",
-        path, host);
-    send(probe_fd, probe_req, probe_len, 0);
-
-    char probe_headers[4096];
     int status_code = 0;
     uint64_t total_size = 0;
     int supports_range = 0;
-    read_http_headers(probe_fd, probe_headers, sizeof(probe_headers), &status_code, &total_size, &supports_range);
-    close(probe_fd);
+    char redirect_location[2048];
+    char probe_headers[4096];
+
+    // Follow redirects if any (e.g. 301, 302, 307, 308)
+    while (redirect_count < MAX_REDIRECTS) {
+        parse_url(current_url, host, &port, path);
+
+        int probe_fd = connect_to_host_with_retry(host, port, 3);
+        if (probe_fd < 0) {
+            pthread_mutex_lock(&g_mutex);
+            g_status.state = STATUS_ERROR;
+            snprintf(g_status.error_message, sizeof(g_status.error_message), "Failed to connect to %s:%d (timeout/retry)", host, port);
+            g_is_running = 0;
+            pthread_mutex_unlock(&g_mutex);
+            return NULL;
+        }
+
+        char probe_req[4096];
+        int probe_len = snprintf(probe_req, sizeof(probe_req),
+            "GET %s HTTP/1.1\r\n"
+            "Host: %s\r\n"
+            "User-Agent: PS5-Net-Downloader-Turbo/1.2\r\n"
+            "Range: bytes=0-0\r\n"
+            "Connection: close\r\n\r\n",
+            path, host);
+        send(probe_fd, probe_req, probe_len, 0);
+
+        read_http_headers(probe_fd, probe_headers, sizeof(probe_headers), &status_code, &total_size, &supports_range, redirect_location, sizeof(redirect_location));
+        close(probe_fd);
+
+        if (status_code == 301 || status_code == 302 || status_code == 303 || status_code == 307 || status_code == 308) {
+            if (strlen(redirect_location) > 0) {
+                strncpy(current_url, redirect_location, sizeof(current_url) - 1);
+                redirect_count++;
+                continue;
+            }
+        }
+        break;
+    }
+
+    // Check if filename can be resolved from Content-Disposition
+    char header_filename[256];
+    if (extract_filename_from_headers(probe_headers, header_filename, sizeof(header_filename))) {
+        pthread_mutex_lock(&g_mutex);
+        // Only override if user did not specify a custom filename or if current name looks like a hash/id
+        int is_auto_name = (strstr(g_status.filename, "download_") != NULL || strstr(g_status.filename, ".pkg") != NULL && strlen(g_status.filename) < 12);
+        if (is_auto_name || g_status.filename[0] == '\0') {
+            strncpy(g_status.filename, header_filename, sizeof(g_status.filename) - 1);
+            // Rebuild save path with resolved filename
+            char *last_slash = strrchr(g_status.save_path, '/');
+            if (last_slash) {
+                *(last_slash + 1) = '\0';
+                strncat(g_status.save_path, g_status.filename, sizeof(g_status.save_path) - strlen(g_status.save_path) - 1);
+            }
+        }
+        pthread_mutex_unlock(&g_mutex);
+    }
 
     if (total_size == 0 || (status_code != 200 && status_code != 206)) {
-        // Fallback: standard GET request to determine size
-        int fallback_fd = connect_to_host(host, port);
+        // Fallback: standard request without Range
+        int fallback_fd = connect_to_host_with_retry(host, port, 2);
         if (fallback_fd >= 0) {
-            char f_req[2048];
+            char f_req[4096];
             int f_len = snprintf(f_req, sizeof(f_req),
                 "GET %s HTTP/1.1\r\n"
                 "Host: %s\r\n"
-                "User-Agent: PS5-Net-Downloader-Turbo/1.1\r\n"
+                "User-Agent: PS5-Net-Downloader-Turbo/1.2\r\n"
                 "Connection: close\r\n\r\n",
                 path, host);
             send(fallback_fd, f_req, f_len, 0);
-            read_http_headers(fallback_fd, probe_headers, sizeof(probe_headers), &status_code, &total_size, &supports_range);
+            read_http_headers(fallback_fd, probe_headers, sizeof(probe_headers), &status_code, &total_size, &supports_range, NULL, 0);
             close(fallback_fd);
         }
     }
@@ -355,14 +489,13 @@ static void *master_download_thread(void *arg) {
         return NULL;
     }
 
-    // Pre-allocate file size if known
     if (total_size > 0) {
         ftruncate(file_fd, total_size);
     }
 
     int thread_count = g_requested_threads;
     if (!supports_range || total_size < (uint64_t)(thread_count * 1024 * 1024)) {
-        thread_count = 1; // Fallback to single stream
+        thread_count = 1;
     }
     if (thread_count > MAX_THREADS) thread_count = MAX_THREADS;
 
@@ -396,7 +529,6 @@ static void *master_download_thread(void *arg) {
             pthread_create(&threads[i], NULL, parallel_chunk_worker, &args[i]);
         }
 
-        // Monitoring loop
         while (!g_abort_flag) {
             usleep(500000); // 500 ms
 
@@ -429,14 +561,14 @@ static void *master_download_thread(void *arg) {
             pthread_join(threads[i], NULL);
         }
     } else {
-        // Single thread fallback
-        int stream_fd = connect_to_host(host, port);
+        // Single thread fallback with retries
+        int stream_fd = connect_to_host_with_retry(host, port, 3);
         if (stream_fd >= 0) {
-            char req[2048];
+            char req[4096];
             int r_len = snprintf(req, sizeof(req),
                 "GET %s HTTP/1.1\r\n"
                 "Host: %s\r\n"
-                "User-Agent: PS5-Net-Downloader-Turbo/1.1\r\n"
+                "User-Agent: PS5-Net-Downloader-Turbo/1.2\r\n"
                 "Connection: close\r\n\r\n",
                 path, host);
             send(stream_fd, req, r_len, 0);
@@ -445,7 +577,7 @@ static void *master_download_thread(void *arg) {
             int s_code = 0;
             uint64_t c_len = 0;
             int s_range = 0;
-            read_http_headers(stream_fd, h_buf, sizeof(h_buf), &s_code, &c_len, &s_range);
+            read_http_headers(stream_fd, h_buf, sizeof(h_buf), &s_code, &c_len, &s_range, NULL, 0);
 
             char *chunk = malloc(CHUNK_BUFFER_SIZE);
             if (chunk) {
@@ -514,9 +646,11 @@ int downloader_start(const char *url, const char *save_dir, const char *filename
     g_requested_threads = (threads >= 1 && threads <= MAX_THREADS) ? threads : 4;
 
     strncpy(g_status.url, url, sizeof(g_status.url) - 1);
+    g_status.url[sizeof(g_status.url) - 1] = '\0';
 
     if (filename && filename[0] != '\0') {
         strncpy(g_status.filename, filename, sizeof(g_status.filename) - 1);
+        g_status.filename[sizeof(g_status.filename) - 1] = '\0';
     } else {
         extract_filename_from_url(url, g_status.filename, sizeof(g_status.filename));
     }

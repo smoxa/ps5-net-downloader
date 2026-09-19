@@ -214,7 +214,7 @@ static void handle_client(int client_fd) {
             if (body) body += 4;
             else body = "";
 
-            char url[1024] = {0};
+            char url[2048] = {0};
             char save_dir[256] = "/data/pkg/";
             char filename[256] = {0};
 

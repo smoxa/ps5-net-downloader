@@ -14,7 +14,7 @@ typedef enum {
 
 typedef struct {
     download_state_t state;
-    char url[1024];
+    char url[2048];
     char save_path[512];
     char filename[256];
     uint64_t downloaded_bytes;
